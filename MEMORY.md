@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T020`（MAE domain 状态机）
-- **当前阶段**：P3 MAE（T019 完成，T020-T024 待做）
-- **上一轮做了什么**：T019 完成——000001_init_mae.up/down.sql（mae_configuration 全字段、mae_id UNIQUE、status index、mae_runtime_metric_snapshot UNIQUE(mae_id,business_date,metric_key)）。
+- **下一个要做的任务**：`T021`（MAE 指标聚合 Redis Counter）
+- **当前阶段**：P3 MAE（T019-T020 完成，T021-T024 待做）
+- **上一轮做了什么**：T020 完成——MAE 6 状态枚举 + 合法迁移表（Cooldown→Active 非法断言通过）；EvaluateCircuitBreaker 纯函数（exposure 阈值/异常率/测卡三条件）；EvaluateTesting 纯函数（PROMOTE/HOLD/SUSPEND 三决策）；CanRecoverToTesting（当日锁 + cooldown 判断）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
