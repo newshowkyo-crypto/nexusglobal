@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T035`（cmd 装配+中间件）
-- **当前阶段**：P5 Treasury 完成（T030-T034 全部完成），进入 P6 收尾
-- **上一轮做了什么**：T034 完成——Treasury handler（POST /admin/banking-calendar、POST /admin/sweep-rule、PATCH /admin/sweep-rule/{id}、POST /internal/sweep/evaluate、POST /internal/sweep/{id}/submit、POST /internal/sweep/{id}/reconcile + 测试）。
+- **下一个要做的任务**：`T036`（端到端集成测试）
+- **当前阶段**：P6 收尾（T035 完成，T036-T038 待做）
+- **上一轮做了什么**：T035 完成——cmd/api/main.go（chi 路由注册、httpx 中间件 RequestID/Recover、/healthz、/readyz、graceful shutdown）；cmd/worker/main.go（信号处理）；httpx（RequestID、Recover、HealthCheck、ReadinessCheck）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
