@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T010`（Ledger domain 复式记账规则）
-- **当前阶段**：P1 Ledger（T009 完成，T010-T012 待做）
-- **上一轮做了什么**：T009 完成——000004_init_ledger.up/down.sql（ledger_account/ledger_transaction/ledger_entry 三表、numeric(20,4)、idempotency_key UNIQUE、CHECK amount>0）；cmd/migrate/main.go 实现（golang-migrate 封装 up/down/drop）。
+- **下一个要做的任务**：`T011`（Ledger repository sqlc + queries）
+- **当前阶段**：P1 Ledger（T009-T010 完成，T011-T012 待做）
+- **上一轮做了什么**：T010 完成——Direction(DEBIT/CREDIT)、AccountType 6 枚举（SETTLED/PENDING/RESERVE/FROZEN_PAYOUT/DISPUTE_HOLD/EXTERNAL_PAYOUT_SETTLEMENT）、TransactionType 4 枚举、Entry/Transaction 结构体、ValidateBalanced 借贷平衡校验（空/零/负/奇数/不平衡/方向非法/多对/精度全覆盖）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
