@@ -139,9 +139,9 @@ type MetricReader interface {
 }
 
 type EvaluateCircuitBreakerCmd struct {
-	MAEID          string
-	BusinessDate   string
-	AbnormalRateBps int32
+	MAEID            string
+	BusinessDate     string
+	AbnormalRateBps  int32
 	CardTestingCount int32
 }
 
@@ -180,12 +180,12 @@ func (s *Service) EvaluateCircuitBreaker(ctx context.Context, metrics MetricRead
 }
 
 type EvaluateTestingCmd struct {
-	MAEID             string
-	TxnCount          int32
-	SuccessRateBps    int32
-	AbnormalRateBps   int32
-	P95LatencyMs      int32
-	CardTestingCount  int32
+	MAEID            string
+	TxnCount         int32
+	SuccessRateBps   int32
+	AbnormalRateBps  int32
+	P95LatencyMs     int32
+	CardTestingCount int32
 }
 
 func (s *Service) EvaluateTesting(ctx context.Context, cmd EvaluateTestingCmd) (domain.TestingResult, error) {

@@ -82,15 +82,27 @@ func (s *Service) Evaluate(ctx context.Context, cmd EvaluateCmd) (EvaluateResult
 		CutOffMatrix: parseCutOffMatrix(calendar.CutOffMatrix),
 	}, rule.Rail, cmd.AsOf)
 
+	dailyCount, _ := s.repo.CountDailySweeps(ctx, cmd.SweepRuleID, pgtype.Timestamptz{
+		Time:  time.Date(cmd.AsOf.Year(), cmd.AsOf.Month(), cmd.AsOf.Day(), 0, 0, 0, 0, cmd.AsOf.Location()),
+		Valid: true,
+	})
+
 	beneficiary := domain.EvaluateBeneficiary(&domain.SweepRule{
 		BeneficiaryType:        domain.BeneficiaryType(rule.BeneficiaryType),
 		SameNameVerified:       rule.SameNameVerified,
 		ApprovalThresholdMinor: rule.ApprovalThresholdMinor,
 	}, 0)
 
+	if !beneficiary.Allowed {
+		return EvaluateResult{
+			Decision: domain.SweepReject,
+			Reason:   beneficiary.RejectReason,
+		}, nil
+	}
+
 	decision := domain.EvaluateSweepTrigger(domain.SweepTriggerInput{
 		AccumulatedMinor: 0,
-		DailySweepCount:  0,
+		DailySweepCount:  int(dailyCount),
 		Rule: &domain.SweepRule{
 			TriggerThresholdMinor: rule.TriggerThresholdMinor,
 			MaxDailySweepCount:    int(rule.MaxDailySweepCount),
@@ -102,6 +114,31 @@ func (s *Service) Evaluate(ctx context.Context, cmd EvaluateCmd) (EvaluateResult
 
 	if decision == domain.SweepDelayed {
 		s.delayQ.Enqueue(ctx, cmd.SweepRuleID.String(), cmd.AsOf.Add(10*time.Minute))
+		return EvaluateResult{
+			Decision: decision,
+			Reason:   "outside banking window, queued for later",
+		}, nil
+	}
+
+	if decision == domain.SweepSubmit {
+		transfer, err := s.repo.InsertTransfer(ctx, db.InsertSweepTransferParams{
+			SweepRuleID:     cmd.SweepRuleID,
+			SourceAccountID: rule.SourceBankAccountID,
+			TargetAccountID: rule.TargetBankAccountID,
+			AmountMinor:     rule.TriggerThresholdMinor,
+			Currency:        rule.Currency,
+			Rail:            rule.Rail,
+			Status:          "Locked",
+			IdempotencyKey:  "sweep:" + cmd.SweepRuleID.String() + ":" + cmd.AsOf.Format("20060102"),
+		})
+		if err != nil {
+			return EvaluateResult{}, fmt.Errorf("insert transfer: %w", err)
+		}
+		return EvaluateResult{
+			Decision:   decision,
+			TransferID: transfer.ID.String(),
+			Reason:     "threshold met, within window",
+		}, nil
 	}
 
 	return EvaluateResult{

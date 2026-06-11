@@ -1,12 +1,12 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/nexusglobal/mamr/internal/ledger/domain"
 	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
@@ -22,24 +22,6 @@ type BalanceResponse struct {
 	FrozenPayoutBalance    string `json:"frozen_payout_balance"`
 	DisputeHoldBalance     string `json:"dispute_hold_balance"`
 	AvailablePayoutBalance string `json:"available_payout_balance"`
-}
-
-type LedgerService interface {
-	Post(ctx context.Context, cmd PostCmd) (PostResult, error)
-}
-
-type PostCmd struct {
-	IdempotencyKey  string
-	TransactionType domain.TransactionType
-	AggregateType   string
-	AggregateID     string
-	Description     string
-	Entries         []domain.Entry
-}
-
-type PostResult struct {
-	TransactionID string
-	Replayed      bool
 }
 
 type Handler struct {
@@ -78,10 +60,22 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = json.NewEncoder(w).Encode(BalanceResponse{
-		MerchantID: account.MerchantID.String(),
-		Currency:   account.Currency,
+	writeJSON(w, http.StatusOK, BalanceResponse{
+		MerchantID:             account.MerchantID.String(),
+		Currency:               account.Currency,
+		PendingBalance:         decimal.Zero.String(),
+		SettledBalance:         decimal.Zero.String(),
+		ReserveBalance:         decimal.Zero.String(),
+		FrozenPayoutBalance:    decimal.Zero.String(),
+		DisputeHoldBalance:     decimal.Zero.String(),
+		AvailablePayoutBalance: decimal.Zero.String(),
 	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, err *apperr.Error) {

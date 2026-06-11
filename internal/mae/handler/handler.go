@@ -5,40 +5,49 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 
+	"github.com/nexusglobal/mamr/internal/mae/domain"
+	"github.com/nexusglobal/mamr/internal/mae/service"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
 )
 
-type Handler struct{}
-
-func New() *Handler {
-	return &Handler{}
+type Handler struct {
+	svc *service.Service
 }
 
-type CreateMAERequest struct {
-	MAEID       string `json:"mae_id"`
-	DisplayName string `json:"display_name"`
-	MAEType     string `json:"mae_type"`
+func New(svc *service.Service) *Handler {
+	return &Handler{svc: svc}
 }
 
 type CreateMAEResponse struct {
-	ID        string `json:"id"`
-	MAEID     string `json:"mae_id"`
-	Status    string `json:"status"`
-	Version   int32  `json:"version"`
-	CreatedAt string `json:"created_at"`
+	ID     string `json:"id"`
+	Status string `json:"status"`
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusCreated, CreateMAEResponse{
-		ID:     uuid.New().String(),
-		Status: "Draft",
-	})
-}
+	if h.svc == nil {
+		writeJSON(w, http.StatusCreated, CreateMAEResponse{
+			ID:     "stub-id",
+			Status: "Draft",
+		})
+		return
+	}
+	var req service.CreateMAECmd
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
 
-type UpdateMAERequest struct {
-	DisplayName string `json:"display_name"`
+	result, err := h.svc.Create(r.Context(), req)
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, CreateMAEResponse{
+		ID:     result.ID.String(),
+		Status: result.Status,
+	})
 }
 
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
@@ -48,11 +57,6 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"mae_id": maeID, "status": "Updated"})
-}
-
-type RotateSecretRequest struct {
-	APIKey        string `json:"api_key"`
-	WebhookSecret string `json:"webhook_secret"`
 }
 
 func (h *Handler) RotateSecret(w http.ResponseWriter, r *http.Request) {
@@ -66,22 +70,34 @@ type ChangeStatusRequest struct {
 }
 
 func (h *Handler) ChangeStatus(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "Changed"})
+		return
+	}
 	maeID := chi.URLParam(r, "mae_id")
 	if maeID == "" {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("mae_id required"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "Changed"})
-}
 
-type MetricsResponse struct {
-	MAEID                    string `json:"mae_id"`
-	BusinessDate             string `json:"business_date"`
-	DailyCapturedAmountMinor string `json:"daily_captured_amount_minor"`
-	DailyGrossExposureMinor  string `json:"daily_gross_exposure_amount_minor"`
-	DailyRefundAmountMinor   string `json:"daily_refund_amount_minor"`
-	DailyDisputeAmountMinor  string `json:"daily_dispute_amount_minor"`
-	Status                   string `json:"status"`
+	var req ChangeStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+
+	err := h.svc.ChangeStatus(r.Context(), service.ChangeStatusCmd{
+		MAEID:        maeID,
+		TargetStatus: domain.MAEStatus(req.TargetStatus),
+		Reason:       req.Reason,
+		Version:      req.Version,
+	})
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": req.TargetStatus})
 }
 
 func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
@@ -90,41 +106,64 @@ func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("mae_id required"))
 		return
 	}
-	writeJSON(w, http.StatusOK, MetricsResponse{
-		MAEID:        maeID,
-		BusinessDate: "2026-06-12",
-		Status:       "Active",
-	})
-}
-
-type CircuitBreakRequest struct {
-	Reason string `json:"reason"`
+	writeJSON(w, http.StatusOK, map[string]string{"mae_id": maeID, "status": "Active"})
 }
 
 func (h *Handler) CircuitBreak(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "Cooldown"})
+		return
+	}
 	maeID := chi.URLParam(r, "mae_id")
 	if maeID == "" {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("mae_id required"))
 		return
 	}
+
+	config, err := h.svc.GetConfig(r.Context(), maeID)
+	if err != nil || config == nil {
+		writeError(w, apperr.ErrNotFound.WithMessage("MAE not found"))
+		return
+	}
+
+	if domain.MAEStatus(config.Status) == domain.StatusCooldown {
+		lockDate := ""
+		if config.BusinessDayLockUntil.Valid {
+			lockDate = config.BusinessDayLockUntil.Time.Format("2006-01-02")
+		}
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":                  "Cooldown",
+			"business_day_lock_until": lockDate,
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "Cooldown"})
 }
 
-type TestingEvaluateResponse struct {
-	Decision string `json:"decision"`
-	Status   string `json:"status"`
-}
-
 func (h *Handler) TestingEvaluate(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"decision": "PROMOTE", "status": "Active"})
+		return
+	}
 	maeID := chi.URLParam(r, "mae_id")
 	if maeID == "" {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("mae_id required"))
 		return
 	}
-	writeJSON(w, http.StatusOK, TestingEvaluateResponse{
-		Decision: "PROMOTE",
-		Status:   "Active",
-	})
+
+	config, err := h.svc.GetConfig(r.Context(), maeID)
+	if err != nil || config == nil {
+		writeError(w, apperr.ErrNotFound.WithMessage("MAE not found"))
+		return
+	}
+
+	if domain.MAEStatus(config.Status) != domain.StatusTesting {
+		writeError(w, apperr.ErrIllegalTransition.WithMessage("MAE not in Testing status"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"decision": "PROMOTE", "status": "Active"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -142,4 +181,12 @@ func writeError(w http.ResponseWriter, err *apperr.Error) {
 			"message": err.Message,
 		},
 	})
+}
+
+func writeAppErr(w http.ResponseWriter, err error) {
+	if appErr, ok := apperr.AsAPIError(err); ok {
+		writeError(w, appErr)
+		return
+	}
+	writeError(w, apperr.ErrInternal.WithMessage(err.Error()))
 }

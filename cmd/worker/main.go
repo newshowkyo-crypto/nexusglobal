@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/nexusglobal/mamr/internal/platform/config"
 	"github.com/nexusglobal/mamr/internal/platform/logger"
+	"github.com/nexusglobal/mamr/internal/platform/postgres"
+	"github.com/nexusglobal/mamr/internal/webhook/consumer"
 )
 
 func main() {
@@ -18,12 +23,40 @@ func main() {
 	}
 
 	log := logger.New(cfg.LogLevel)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pool, pgErr := postgres.NewPool(ctx, cfg.PostgresDSN)
+	if pgErr != nil {
+		log.Warn("postgres unavailable", "err", pgErr)
+	}
+	_ = pool
+
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Warn("redis unavailable", "err", err)
+	}
+
 	log.Info("worker starting", "concurrency", cfg.OutboxWorkerConcurrency)
+
+	if rdb != nil {
+		lpConsumer := consumer.New(rdb, nil, log)
+		go func() {
+			if err := lpConsumer.Start(ctx); err != nil {
+				log.Error("lp consumer error", "err", err)
+			}
+		}()
+		log.Info("lp webhook consumer started")
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Info("shutting down worker...")
+	cancel()
+	if rdb != nil {
+		rdb.Close()
+	}
 	log.Info("worker stopped")
 }

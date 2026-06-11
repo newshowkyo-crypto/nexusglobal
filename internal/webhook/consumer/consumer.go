@@ -37,9 +37,9 @@ type LedgerPostResult struct {
 }
 
 type Consumer struct {
-	stream   *stream.Consumer
-	ledger   LedgerService
-	logger   *slog.Logger
+	stream *stream.Consumer
+	ledger LedgerService
+	logger *slog.Logger
 }
 
 func New(rdb *redis.Client, ledger LedgerService, logger *slog.Logger) *Consumer {

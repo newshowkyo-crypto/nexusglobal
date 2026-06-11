@@ -9,6 +9,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type BankingCalendar struct {
+	ID                    uuid.UUID          `json:"id"`
+	CalendarName          string             `json:"calendar_name"`
+	Jurisdiction          string             `json:"jurisdiction"`
+	Timezone              string             `json:"timezone"`
+	BusinessDays          []byte             `json:"business_days"`
+	Holidays              []byte             `json:"holidays"`
+	EmergencyClosureDates []byte             `json:"emergency_closure_dates"`
+	CutOffMatrix          []byte             `json:"cut_off_matrix"`
+	Status                string             `json:"status"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
 type LedgerAccount struct {
 	ID          uuid.UUID          `json:"id"`
 	MerchantID  uuid.UUID          `json:"merchant_id"`
@@ -120,6 +134,47 @@ type PayoutRequest struct {
 	IdempotencyKey  string             `json:"idempotency_key"`
 	ProviderRef     string             `json:"provider_ref"`
 	LockID          string             `json:"lock_id"`
+	Version         int32              `json:"version"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type SweepRule struct {
+	ID                     uuid.UUID          `json:"id"`
+	SourceBankAccountID    uuid.UUID          `json:"source_bank_account_id"`
+	TargetBankAccountID    uuid.UUID          `json:"target_bank_account_id"`
+	Currency               string             `json:"currency"`
+	Rail                   string             `json:"rail"`
+	BeneficiaryType        string             `json:"beneficiary_type"`
+	SameNameVerified       bool               `json:"same_name_verified"`
+	TriggerThresholdMinor  int64              `json:"trigger_threshold_minor"`
+	SweepRatioBps          int32              `json:"sweep_ratio_bps"`
+	MaxSingleSweepMinor    int64              `json:"max_single_sweep_minor"`
+	MinResidualMinor       int64              `json:"min_residual_minor"`
+	TimeWindowMatrix       []byte             `json:"time_window_matrix"`
+	ScheduledSweepTimes    []byte             `json:"scheduled_sweep_times"`
+	SweepMode              string             `json:"sweep_mode"`
+	MaxDailySweepCount     int32              `json:"max_daily_sweep_count"`
+	DelayQueueEnabled      bool               `json:"delay_queue_enabled"`
+	RequireFourEyes        bool               `json:"require_four_eyes"`
+	ApprovalThresholdMinor int64              `json:"approval_threshold_minor"`
+	Status                 string             `json:"status"`
+	Version                int32              `json:"version"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+}
+
+type SweepTransfer struct {
+	ID              uuid.UUID          `json:"id"`
+	SweepRuleID     uuid.UUID          `json:"sweep_rule_id"`
+	SourceAccountID uuid.UUID          `json:"source_account_id"`
+	TargetAccountID uuid.UUID          `json:"target_account_id"`
+	AmountMinor     int64              `json:"amount_minor"`
+	Currency        string             `json:"currency"`
+	Rail            string             `json:"rail"`
+	Status          string             `json:"status"`
+	IdempotencyKey  string             `json:"idempotency_key"`
+	BankRef         string             `json:"bank_ref"`
 	Version         int32              `json:"version"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`

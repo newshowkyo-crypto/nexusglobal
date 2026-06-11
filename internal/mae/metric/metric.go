@@ -65,15 +65,15 @@ func (a *Aggregator) GetDispute(ctx context.Context, maeID, businessDate string)
 }
 
 type Snapshot struct {
-	MAEID               string
-	BusinessDate        string
-	GrossExposureMinor  int64
-	CapturedMinor       int64
-	RefundMinor         int64
-	DisputeMinor        int64
-	AbnormalRateBps     int32
-	P95LatencyMs        int32
-	CardTestingCount    int32
+	MAEID              string
+	BusinessDate       string
+	GrossExposureMinor int64
+	CapturedMinor      int64
+	RefundMinor        int64
+	DisputeMinor       int64
+	AbnormalRateBps    int32
+	P95LatencyMs       int32
+	CardTestingCount   int32
 }
 
 func (a *Aggregator) TakeSnapshot(ctx context.Context, maeID, businessDate string) (Snapshot, error) {

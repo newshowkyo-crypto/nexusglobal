@@ -1,41 +1,59 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
+	"github.com/nexusglobal/mamr/internal/platform/crypto"
 	"github.com/nexusglobal/mamr/internal/platform/idempotency"
+	"github.com/nexusglobal/mamr/internal/platform/stream"
 	"github.com/nexusglobal/mamr/internal/webhook/domain"
+	"github.com/nexusglobal/mamr/internal/webhook/repository/db"
 )
 
-type Handler struct{}
+type Repository interface {
+	InsertIngressEvent(ctx context.Context, params db.InsertIngressEventParams) (*db.WebhookIngressEvent, error)
+	GetIngressEventByIdempotencyKey(ctx context.Context, key string) (*db.WebhookIngressEvent, error)
+	GetReceiverProxy(ctx context.Context, providerType, providerID string) (*db.WebhookReceiverProxy, error)
+	UpdateStatus(ctx context.Context, id uuid.UUID, status, errorMessage string) error
+}
 
-func New() *Handler {
-	return &Handler{}
+type Handler struct {
+	repo      Repository
+	producer  *stream.Producer
+	encryptor *crypto.Encryptor
+}
+
+func New(repo Repository, producer *stream.Producer, encryptor *crypto.Encryptor) *Handler {
+	return &Handler{repo: repo, producer: producer, encryptor: encryptor}
 }
 
 type WebhookResponse struct {
 	Received       bool   `json:"received"`
 	IngressID      string `json:"ingress_id"`
 	IdempotencyKey string `json:"idempotency_key"`
+	Duplicated     bool   `json:"duplicated,omitempty"`
 }
 
 func (h *Handler) HandleMAE(w http.ResponseWriter, r *http.Request) {
-	h.handleWebhook(w, r, "mae")
+	h.handleWebhook(w, r, "mae", "stream:webhook:mae")
 }
 
 func (h *Handler) HandleBank(w http.ResponseWriter, r *http.Request) {
-	h.handleWebhook(w, r, "bank")
+	h.handleWebhook(w, r, "bank", "stream:webhook:bank")
 }
 
 func (h *Handler) HandleLP(w http.ResponseWriter, r *http.Request) {
-	h.handleWebhook(w, r, "lp")
+	h.handleWebhook(w, r, "lp", "stream:webhook:lp")
 }
 
-func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, providerType string) {
+func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, providerType, streamName string) {
 	providerID := chi.URLParam(r, "provider_id")
 	if providerID == "" {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("provider_id required"))
@@ -50,19 +68,90 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 		return
 	}
 
-	payload := make([]byte, r.ContentLength)
-	r.Body.Read(payload)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, apperr.ErrInternal.WithMessage("failed to read body"))
+		return
+	}
 
 	payloadHash := idempotency.PayloadHash(payload)
+	businessDate := ""
 	idempotencyKey := domain.ComputeIdempotencyKey(
-		providerType, providerID, providerEventID, "webhook", payloadHash, "")
+		providerType, providerID, providerEventID, "webhook", payloadHash, businessDate)
 
-	_ = signature
-	_ = payloadHash
+	if h.repo != nil {
+		existing, _ := h.repo.GetIngressEventByIdempotencyKey(r.Context(), idempotencyKey)
+		if existing != nil {
+			writeJSON(w, http.StatusOK, WebhookResponse{
+				Received:       true,
+				IngressID:      existing.ID.String(),
+				IdempotencyKey: idempotencyKey,
+				Duplicated:     true,
+			})
+			return
+		}
+
+		proxy, _ := h.repo.GetReceiverProxy(r.Context(), providerType, providerID)
+		if proxy != nil {
+			valid := domain.VerifyHMACSHA256(payload, signature, proxy.SecretCiphertext)
+			if !valid {
+				h.repo.InsertIngressEvent(r.Context(), db.InsertIngressEventParams{
+					ProviderType:         providerType,
+					ProviderID:           providerID,
+					ProviderEventID:      providerEventID,
+					EventType:            "webhook",
+					IdempotencyKey:       idempotencyKey,
+					PayloadHash:          payloadHash,
+					RawPayloadCiphertext: payload,
+					Status:               string(domain.StatusRejected),
+				})
+				writeError(w, apperr.ErrUnauthorized.WithMessage("invalid signature"))
+				return
+			}
+		}
+
+		encryptedPayload := payload
+		if h.encryptor != nil {
+			enc, err := h.encryptor.Encrypt(r.Context(), payload, crypto.Meta{
+				TenantID:  providerType,
+				RecordID:  providerID,
+				FieldName: "raw_payload",
+			})
+			if err == nil {
+				encryptedPayload = enc
+			}
+		}
+
+		ingress, err := h.repo.InsertIngressEvent(r.Context(), db.InsertIngressEventParams{
+			ProviderType:         providerType,
+			ProviderID:           providerID,
+			ProviderEventID:      providerEventID,
+			EventType:            "webhook",
+			IdempotencyKey:       idempotencyKey,
+			PayloadHash:          payloadHash,
+			RawPayloadCiphertext: encryptedPayload,
+			Status:               string(domain.StatusReceived),
+		})
+		if err != nil {
+			writeError(w, apperr.ErrInternal.WithMessage("failed to write ingress"))
+			return
+		}
+
+		if h.producer != nil {
+			h.producer.Publish(r.Context(), streamName, stream.Event{
+				IdempotencyKey: idempotencyKey,
+				ProviderType:   providerType,
+				ProviderID:     providerID,
+				EventType:      "webhook",
+				PayloadHash:    payloadHash,
+				IngressID:      ingress.ID.String(),
+			})
+		}
+	}
 
 	writeJSON(w, http.StatusOK, WebhookResponse{
 		Received:       true,
-		IngressID:      "ingress-id",
+		IngressID:      "stub-ingress-id",
 		IdempotencyKey: idempotencyKey,
 	})
 }

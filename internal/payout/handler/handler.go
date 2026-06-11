@@ -73,6 +73,33 @@ func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, FreezeResponse{Status: "BalanceFrozen"})
 }
 
+func (h *Handler) FxLock(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(idStr); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "FxLocked"})
+}
+
+func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(idStr); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "LPProcessing"})
+}
+
+func (h *Handler) Reconcile(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(idStr); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "Confirmed"})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

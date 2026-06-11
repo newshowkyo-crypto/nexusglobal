@@ -9,8 +9,8 @@ import (
 )
 
 type DelayQueue struct {
-	rdb   *redis.Client
-	key   string
+	rdb *redis.Client
+	key string
 }
 
 func NewDelayQueue(rdb *redis.Client, key string) *DelayQueue {
