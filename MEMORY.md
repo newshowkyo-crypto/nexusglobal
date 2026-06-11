@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T031`（Treasury domain 日历/窗口/受益人）
-- **当前阶段**：P5 Treasury（T030 完成，T031-T034 待做）
-- **上一轮做了什么**：T030 完成——000003_init_treasury.up/down.sql（banking_calendar UNIQUE(calendar_name)、sweep_rule、sweep_transfer idempotency_key UNIQUE + CHECK amount_minor>0）。
+- **下一个要做的任务**：`T032`（Treasury repo+DelayQueue）
+- **当前阶段**：P5 Treasury（T030-T031 完成，T032-T034 待做）
+- **上一轮做了什么**：T031 完成——WithinBankingWindow（工作日/节假日/cut-off/时区判断）；EvaluateBeneficiary（UNKNOWN reject/SameName verified/unverified/ThirdParty 阈值/CrossBorder approval 四分支）；EvaluateSweepTrigger（SUBMIT/ACCUMULATE/DELAYED/APPROVAL_REQUIRED 决策）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
