@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T007`（crypto + MockKMS）
-- **当前阶段**：P0 脚手架（T001-T006 已完成）
-- **上一轮做了什么**：T006 完成——apperr（Error type + 全部 API.md §3 错误码 sentinel + AsAPIError 用 errors.As 支持 wrapped error）、idempotency（Compute SHA-256 + PayloadHash + WebhookIdempotencyKey + Store 接口）、clock/logger 测试补充。
+- **下一个要做的任务**：`T008`（external mock + validator）
+- **当前阶段**：P0 脚手架（T001-T007 已完成）
+- **上一轮做了什么**：T007 完成——AES-256-GCM Envelope Encryption（MockKMS 接口、Encrypt/Decrypt、AAD=tenant+record+field+key_version、96-bit nonce、nonce 唯一性、AAD 不匹配解密失败测试全通过）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---

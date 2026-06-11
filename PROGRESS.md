@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T007**
-- 已完成：6 / 38
+- 当前进度指针：**T008**
+- 已完成：7 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T006 Clock/Logger/apperr/idempotency 完成
+- 最近更新：T007 crypto+MockKMS 完成
 
 ---
 
@@ -28,7 +28,7 @@
 | T004 redis | ✅ | T002 | 2026-06-12 | f1de7b6 | |
 | T005 money | ✅ | T001 | 2026-06-12 | 03f74af | |
 | T006 clock/logger/apperr/idempotency | ✅ | T002 | 2026-06-12 | | |
-| T007 crypto+MockKMS | ⬜ | T002 | | | |
+| T007 crypto+MockKMS | ✅ | T002 | 2026-06-12 | | |
 | T008 external mock+validator | ⬜ | T001 | | | |
 
 ### P1 Ledger 双轨账本
