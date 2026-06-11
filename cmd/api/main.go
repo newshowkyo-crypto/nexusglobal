@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/nexusglobal/mamr/internal/admin"
 	"github.com/nexusglobal/mamr/internal/ledger/handler"
 	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
 	maehandler "github.com/nexusglobal/mamr/internal/mae/handler"
@@ -116,8 +117,40 @@ func main() {
 	r.Get("/admin/dashboard", httpx.AdminDashboardHTML(pool, rdb, cfg.AppEnv))
 	r.Get("/admin/dashboard/data", httpx.DashboardHandler(pool, rdb, cfg.AppEnv))
 
+	adminH := admin.NewHandler(pool)
+
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(httpx.AdminAuth)
+
+		// Stats
+		r.Get("/stats", adminH.GetStats)
+
+		// MAE management
+		r.Get("/mae-list", adminH.ListMAEs)
+		r.Get("/mae-detail/{mae_id}", adminH.GetMAE)
+
+		// Payout management
+		r.Get("/payouts", adminH.ListPayouts)
+		r.Get("/payout/{id}", adminH.GetPayout)
+
+		// Outbox
+		r.Get("/outbox", adminH.ListOutbox)
+
+		// Treasury
+		r.Get("/calendars", adminH.ListCalendars)
+		r.Get("/sweep-rules", adminH.ListSweepRules)
+		r.Get("/sweep-transfers", adminH.ListSweepTransfers)
+
+		// Webhook
+		r.Get("/webhook-events", adminH.ListWebhookEvents)
+		r.Get("/webhook-event/{id}", adminH.GetWebhookEvent)
+
+		// Ledger
+		r.Get("/ledger/transactions", adminH.ListLedgerTransactions)
+		r.Get("/ledger/entries", adminH.ListLedgerEntries)
+
+		// Merchants
+		r.Get("/merchants", adminH.ListMerchants)
 
 		r.Route("/merchant/{id}", func(r chi.Router) {
 			r.Get("/balance", ledgerH.GetBalance)
