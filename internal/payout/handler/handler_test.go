@@ -28,12 +28,16 @@ func TestCreateAddress_Success(t *testing.T) {
 	h := New(nil)
 	r := setupRouter(h)
 
-	body := `{"target_asset":"USDT","target_network":"TRON_TRC20","target_address":"TAddr"}`
+	body := `{"target_asset":"USDT","target_network":"TRON_TRC20","target_address":"TN3W4H6rK2ce4vX9YnFQHwKENnHjoxb3m9"}`
 	req := httptest.NewRequest("POST", "/merchant/payout-address", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
+	var resp CreateAddressResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.TargetAddressMasked)
+	assert.Equal(t, "Pending", resp.ScreeningStatus)
 }
 
 func TestCreatePayoutRequest_MissingIdempotencyKey(t *testing.T) {

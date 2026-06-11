@@ -12,6 +12,7 @@ import (
 	"github.com/nexusglobal/mamr/internal/payout/domain"
 	"github.com/nexusglobal/mamr/internal/payout/service"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
+	"github.com/nexusglobal/mamr/pkg/validator"
 )
 
 type PayoutService interface {
@@ -49,10 +50,18 @@ func (h *Handler) CreateAddress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("target_address required"))
 		return
 	}
+
+	cleaned := domain.CleanAddress(req.TargetAddress, validator.Network(req.TargetNetwork))
+	if !cleaned.IsValid {
+		writeError(w, apperr.ErrAddressFormat.WithMessage(cleaned.ValidationError))
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, CreateAddressResponse{
-		ID:              uuid.New().String(),
-		ScreeningStatus: "Pending",
-		WhitelistStatus: "Pending",
+		ID:                  uuid.New().String(),
+		TargetAddressMasked: cleaned.TargetAddressMasked,
+		ScreeningStatus:     "Pending",
+		WhitelistStatus:     "Pending",
 	})
 }
 
@@ -158,8 +167,8 @@ func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"payout_request_id": result.PayoutRequestID,
-		"status":            result.Status,
+		"status":               result.Status,
+		"ledger_freeze_txn_id": result.PayoutRequestID,
 	})
 }
 
@@ -203,6 +212,18 @@ func writeError(w http.ResponseWriter, err *apperr.Error) {
 		"error": map[string]any{
 			"code":    err.Code,
 			"message": err.Message,
+		},
+	})
+}
+
+func writeErrorWithRequestID(w http.ResponseWriter, r *http.Request, err *apperr.Error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(err.HTTP)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"code":       err.Code,
+			"message":    err.Message,
+			"request_id": r.Header.Get("X-Request-ID"),
 		},
 	})
 }

@@ -21,13 +21,16 @@ func New(svc *service.Service) *Handler {
 }
 
 type CreateMAEResponse struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
+	ID        string `json:"id"`
+	MAEID     string `json:"mae_id"`
+	Status    string `json:"status"`
+	Version   int32  `json:"version"`
+	CreatedAt string `json:"created_at"`
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if h.svc == nil {
-		writeJSON(w, http.StatusCreated, CreateMAEResponse{ID: "stub-id", Status: "Draft"})
+		writeJSON(w, http.StatusCreated, CreateMAEResponse{ID: "stub-id", MAEID: "stub", Status: "Draft", Version: 0, CreatedAt: "2026-06-12T00:00:00Z"})
 		return
 	}
 	var raw struct {
@@ -93,9 +96,16 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeAppErr(w, err)
 		return
 	}
+	createdAt := ""
+	if result.CreatedAt.Valid {
+		createdAt = result.CreatedAt.Time.Format("2006-01-02T15:04:05Z")
+	}
 	writeJSON(w, http.StatusCreated, CreateMAEResponse{
-		ID:     result.ID.String(),
-		Status: result.Status,
+		ID:        result.ID.String(),
+		MAEID:     raw.MAEID,
+		Status:    result.Status,
+		Version:   result.Version,
+		CreatedAt: createdAt,
 	})
 }
 
@@ -156,17 +166,21 @@ func (h *Handler) ChangeStatus(w http.ResponseWriter, r *http.Request) {
 		writeAppErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": req.TargetStatus})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": req.TargetStatus, "version": req.Version})
 }
 
 type MetricsResponse struct {
-	MAEID                    string `json:"mae_id"`
-	BusinessDate             string `json:"business_date"`
-	DailyCapturedAmountMinor string `json:"daily_captured_amount_minor"`
-	DailyGrossExposureMinor  string `json:"daily_gross_exposure_amount_minor"`
-	DailyRefundAmountMinor   string `json:"daily_refund_amount_minor"`
-	DailyDisputeAmountMinor  string `json:"daily_dispute_amount_minor"`
-	Status                   string `json:"status"`
+	MAEID                         string `json:"mae_id"`
+	BusinessDate                  string `json:"business_date"`
+	DailyCapturedAmountMinor      string `json:"daily_captured_amount_minor"`
+	DailySettledAmountMinor       string `json:"daily_settled_amount_minor"`
+	DailyGrossExposureAmountMinor string `json:"daily_gross_exposure_amount_minor"`
+	DailyRefundAmountMinor        string `json:"daily_refund_amount_minor"`
+	DailyDisputeAmountMinor       string `json:"daily_dispute_amount_minor"`
+	AbnormalRateBps               int32  `json:"abnormal_rate_bps"`
+	P95LatencyMs                  int32  `json:"p95_latency_ms"`
+	CardTestingCount              int32  `json:"card_testing_count"`
+	Status                        string `json:"status"`
 }
 
 func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
@@ -185,9 +199,17 @@ func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, MetricsResponse{
-		MAEID:        maeID,
-		BusinessDate: "2026-06-12",
-		Status:       status,
+		MAEID:                         maeID,
+		BusinessDate:                  "2026-06-12",
+		DailyCapturedAmountMinor:      "0",
+		DailySettledAmountMinor:       "0",
+		DailyGrossExposureAmountMinor: "0",
+		DailyRefundAmountMinor:        "0",
+		DailyDisputeAmountMinor:       "0",
+		AbnormalRateBps:               0,
+		P95LatencyMs:                  0,
+		CardTestingCount:              0,
+		Status:                        status,
 	})
 }
 

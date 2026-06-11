@@ -116,7 +116,8 @@ func TestGetMetrics_Response(t *testing.T) {
 	r.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]string
+	var resp MetricsResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "mae_01", resp["mae_id"])
+	assert.Equal(t, "mae_01", resp.MAEID)
+	assert.Equal(t, "Active", resp.Status)
 }

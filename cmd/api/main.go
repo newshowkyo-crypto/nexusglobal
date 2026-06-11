@@ -53,7 +53,7 @@ func main() {
 
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Warn("redis unavailable, some features disabled", "err", err)
+		log.Warn("redis unavailable", "err", err)
 		rdb = nil
 	}
 
@@ -99,6 +99,8 @@ func main() {
 	treasurySvc := treasuryservice.New(treasuryRepoInst, nil, txm, pool, delayQ, log)
 	treasuryH := treasuryhandler.New(treasurySvc)
 
+	outboxH := payouthandler.NewOutboxHandler(pool)
+
 	dbPing := func() error { return pool.Ping(context.Background()) }
 	redisPing := func() error {
 		if rdb == nil {
@@ -111,6 +113,8 @@ func main() {
 	r.Get("/readyz", httpx.ReadinessCheck(dbPing, redisPing))
 
 	r.Route("/admin", func(r chi.Router) {
+		r.Use(httpx.AdminAuth)
+
 		r.Route("/merchant/{id}", func(r chi.Router) {
 			r.Get("/balance", ledgerH.GetBalance)
 		})
@@ -130,14 +134,18 @@ func main() {
 		})
 		r.Get("/webhook/events", webhookH.ListEvents)
 		r.Post("/webhook/events/{id}/replay", webhookH.Replay)
+		r.Get("/outbox", outboxH.List)
+		r.Post("/outbox/{id}/replay", outboxH.Replay)
 	})
 
 	r.Route("/merchant", func(r chi.Router) {
+		r.Use(httpx.MerchantAuth)
 		r.Post("/payout-address", payoutH.CreateAddress)
 		r.Post("/payout-request", payoutH.CreatePayoutRequest)
 	})
 
 	r.Route("/internal", func(r chi.Router) {
+		r.Use(httpx.InternalAuth)
 		r.Post("/payout/{id}/freeze", payoutH.Freeze)
 		r.Post("/payout/{id}/fx-lock", payoutH.FxLock)
 		r.Post("/payout/{id}/submit", payoutH.Submit)

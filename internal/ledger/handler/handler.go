@@ -22,6 +22,8 @@ type BalanceResponse struct {
 	FrozenPayoutBalance    string `json:"frozen_payout_balance"`
 	DisputeHoldBalance     string `json:"dispute_hold_balance"`
 	AvailablePayoutBalance string `json:"available_payout_balance"`
+	Version                int32  `json:"version"`
+	UpdatedAt              string `json:"updated_at"`
 }
 
 type Handler struct {
@@ -66,6 +68,11 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	dispute := numericToDecimal(account.DisputeHoldBalance)
 	available := settled.Sub(reserve).Sub(frozen).Sub(dispute)
 
+	updatedAt := ""
+	if account.UpdatedAt.Valid {
+		updatedAt = account.UpdatedAt.Time.Format("2006-01-02T15:04:05Z")
+	}
+
 	writeJSON(w, http.StatusOK, BalanceResponse{
 		MerchantID:             account.MerchantID.String(),
 		Currency:               account.Currency,
@@ -75,6 +82,8 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		FrozenPayoutBalance:    frozen.String(),
 		DisputeHoldBalance:     dispute.String(),
 		AvailablePayoutBalance: available.String(),
+		Version:                account.Version,
+		UpdatedAt:              updatedAt,
 	})
 }
 
