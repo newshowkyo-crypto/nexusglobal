@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T038`（文档校验+红线自查）
-- **当前阶段**：P6 收尾（T035-T037 完成，T038 待做——最后一个任务）
-- **上一轮做了什么**：T037 完成——reconcile.Worker（ReconcilePayout 查询 UnknownExternalState 的 payout 调 lp.QueryStatus→confirmed/failed 推进最终态、仍未知则保持不动）。
+- **下一个要做的任务**：无（PROJECT COMPLETE）
+- **当前阶段**：全部完成（T001-T038 全部 ✅）
+- **上一轮做了什么**：T038 完成——红线自查全部通过（NF-03 无 float、RED-01/02 无外部调用、RED-06 exposure 只增、RED-08 Cooldown→Active 非法由测试断言验证）、build+lint+test-short 全过。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
@@ -105,5 +105,8 @@
 
 ## 8. 完成状态
 
-- 项目状态：T001 完成，T002 待开始。
-- 完成标志：PROGRESS 中 T001–T037 全 ✅ 且 T038 收尾通过 → 在此写 `PROJECT COMPLETE` 并输出总结。
+- **项目状态**：PROJECT COMPLETE — T001-T038 全部完成
+- **完成标志**：PROGRESS 中 T001–T038 全 ✅
+- **提交**：38 个原子任务全部提交，每个 commit 信息格式 `T0xx: 简述`
+- **红线自查**：NF-03（无 float）、RED-01/02（无外部调用）、RED-06（exposure 只增）、RED-08（Cooldown→Active 非法）全部通过
+- **未决问题**：无
