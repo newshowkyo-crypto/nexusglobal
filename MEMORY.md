@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T013`（Payout/Treasury-ledger/Outbox migration）
-- **当前阶段**：P1 Ledger 完成（T009-T012 全部完成），进入 P2 Payout
-- **上一轮做了什么**：T012 完成——service.Post(ctx, cmd) 幂等入账（先查 idempotency key、ValidateBalanced、事务内写 transaction+entries）；handler.GetBalance 查询端点（GET /admin/merchant/{id}/balance）；handler 测试通过。
+- **下一个要做的任务**：`T014`（Payout domain 状态机 + 地址清洗）
+- **当前阶段**：P2 Payout（T013 完成，T014-T018 待做）
+- **上一轮做了什么**：T013 完成——000005_init_payout.up/down.sql（merchant_treasury_ledger UNIQUE(merchant,currency)+CHECK non-negative、merchant_payout_address、payout_request idempotency_key UNIQUE）；000006_init_outbox.up/down.sql（transactional_outbox idempotency_key UNIQUE、dispatch partial index）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---

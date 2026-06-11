@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T013**
-- 已完成：12 / 38
+- 当前进度指针：**T014**
+- 已完成：13 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T012 Ledger service 完成
+- 最近更新：T013 Payout/Outbox migration 完成
 
 ---
 
@@ -42,7 +42,7 @@
 ### P2 Payout 冻结 + Outbox + Worker
 | 任务 | 状态 | 依赖 | 完成时间 | 提交号 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| T013 payout/outbox migration | ⬜ | T003 | | | |
+| T013 payout/outbox migration | ✅ | T003 | 2026-06-12 | | |
 | T014 payout domain | ⬜ | T008 | | | |
 | T015 payout repository | ⬜ | T013,T014 | | | |
 | T016 payout freeze service (Phase1) | ⬜ | T015,T012 | | | 并发双花测试 |
