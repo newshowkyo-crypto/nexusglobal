@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T028`（Webhook handler 只投 MQ）
-- **当前阶段**：P4 Webhook（T025-T027 完成，T028-T029 待做）
-- **上一轮做了什么**：T027 完成——domain（VerifyHMACSHA256、ComputeIdempotencyKey 两种规则、IngressStatus 枚举）；queries.sql（InsertIngressEvent、GetIngressEventByIdempotencyKey、UpdateIngressEventStatus、GetReceiverProxy）；repository.go；测试通过。
+- **下一个要做的任务**：`T029`（核心消费者 入账）
+- **当前阶段**：P4 Webhook（T025-T028 完成，T029 待做）
+- **上一轮做了什么**：T028 完成——webhook handler（HandleMAE/HandleBank/HandleLP 三入口、验签→payload_hash→idempotency_key→快速 ACK、POST /webhook/{mae,bank,lp}/{provider_id}、GET /admin/webhook/events、POST /admin/webhook/events/{id}/replay + 测试）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---

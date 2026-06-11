@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T028**
-- 已完成：27 / 38
+- 当前进度指针：**T029**
+- 已完成：28 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T027 Webhook domain+repo 完成
+- 最近更新：T028 Webhook handler 完成
 
 ---
 
@@ -65,7 +65,7 @@
 | T025 stream MQ 封装 | ✅ | T004 | 2026-06-12 | | |
 | T026 webhook migration | ✅ | T003 | 2026-06-12 | | |
 | T027 webhook domain+repo (验签) | ✅ | T026,T007,T006 | 2026-06-12 | | |
-| T028 webhook handler (只投MQ) | ⬜ | T027,T025 | | | 不连账务 |
+| T028 webhook handler (只投MQ) | ✅ | T027,T025 | 2026-06-12 | | 不连账务 |
 | T029 核心消费者 (入账) | ⬜ | T028,T012,T018 | | | 不重账 |
 
 ### P5 Treasury 银行清算 + Sweep
