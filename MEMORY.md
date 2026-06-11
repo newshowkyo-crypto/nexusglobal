@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T008`（external mock + validator）
-- **当前阶段**：P0 脚手架（T001-T007 已完成）
-- **上一轮做了什么**：T007 完成——AES-256-GCM Envelope Encryption（MockKMS 接口、Encrypt/Decrypt、AAD=tenant+record+field+key_version、96-bit nonce、nonce 唯一性、AAD 不匹配解密失败测试全通过）。
+- **下一个要做的任务**：`T009`（Ledger migration）
+- **当前阶段**：P0 脚手架完成（T001-T008 全部完成），进入 P1 Ledger 双轨账本
+- **上一轮做了什么**：T008 完成——lp/bank/mae Client 接口 + 确定性 Mock（Scenario 可注入 success/failure/timeout/delay、per-key scenario、deterministic ID）；validator 地址校验（TRON_TRC20/ETH_ERC20/BTC/SOL regex 表驱动）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
