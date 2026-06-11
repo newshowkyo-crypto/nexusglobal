@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T032**
-- 已完成：31 / 38
+- 当前进度指针：**T033**
+- 已完成：32 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T031 Treasury domain 完成
+- 最近更新：T032 Treasury repo+DelayQueue 完成
 
 ---
 
@@ -73,7 +73,7 @@
 | --- | --- | --- | --- | --- | --- |
 | T030 treasury migration | ✅ | T003 | 2026-06-12 | | |
 | T031 treasury domain (窗口/受益人) | ✅ | T005 | 2026-06-12 | | |
-| T032 treasury repo+DelayQueue | ⬜ | T030,T031,T004 | | | |
+| T032 treasury repo+DelayQueue | ✅ | T030,T031,T004 | 2026-06-12 | | |
 | T033 sweep service+scheduler | ⬜ | T032 | | | 非窗口不调银行 |
 | T034 treasury handler | ⬜ | T033 | | | |
 
