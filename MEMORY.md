@@ -10,8 +10,8 @@
 ## 0. 进度指针（最重要，先看这里）
 
 - **下一个要做的任务**：无（PROJECT COMPLETE）
-- **当前阶段**：全部完成（T001-T038 全部 ✅）
-- **上一轮做了什么**：T038 完成——红线自查全部通过（NF-03 无 float、RED-01/02 无外部调用、RED-06 exposure 只增、RED-08 Cooldown→Active 非法由测试断言验证）、build+lint+test-short 全过。
+- **当前阶段**：全部完成（T001-T038 全部 ✅）+ 端到端功能补全
+- **上一轮做了什么**：修复 10 个缺口——T016 Freeze 写 payout_request+双轨分录、T028 Webhook handler 实际验签+DB+XADD、T024 MAE handler 接入 service、T012 Ledger handler 补全余额、T035 cmd 装配 PG+Redis+所有 handler+worker consumer、T033 Sweep 调 CountDailySweeps+InsertTransfer、T018 Payout handler 补全端点。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
