@@ -133,3 +133,89 @@ func (s *Service) GetConfig(ctx context.Context, maeID string) (*db.MaeConfigura
 func (s *Service) ListConfigs(ctx context.Context) ([]db.MaeConfiguration, error) {
 	return s.repo.ListConfigs(ctx)
 }
+
+type MetricReader interface {
+	GetExposure(ctx context.Context, maeID, businessDate string) (int64, error)
+}
+
+type EvaluateCircuitBreakerCmd struct {
+	MAEID          string
+	BusinessDate   string
+	AbnormalRateBps int32
+	CardTestingCount int32
+}
+
+func (s *Service) EvaluateCircuitBreaker(ctx context.Context, metrics MetricReader, cmd EvaluateCircuitBreakerCmd) error {
+	config, err := s.repo.GetConfigByMAEID(ctx, cmd.MAEID)
+	if err != nil {
+		return err
+	}
+	if config == nil {
+		return apperr.ErrNotFound.WithMessage("MAE not found: " + cmd.MAEID)
+	}
+
+	if domain.MAEStatus(config.Status) != domain.StatusActive {
+		return nil
+	}
+
+	exposure, err := metrics.GetExposure(ctx, cmd.MAEID, cmd.BusinessDate)
+	if err != nil {
+		return err
+	}
+
+	result := domain.EvaluateCircuitBreaker(domain.CircuitBreakerInput{
+		DailyVmaxMinor:     config.DailyVmaxMinor,
+		GrossExposureMinor: exposure,
+		AbnormalRateBps:    cmd.AbnormalRateBps,
+		CmaxBps:            config.CmaxBps,
+		CardTestingCount:   cmd.CardTestingCount,
+		CardTestingLimit:   config.CardTestingLimit,
+	})
+
+	if !result.ShouldTrip {
+		return nil
+	}
+
+	return s.repo.UpdateStatus(ctx, config.ID, string(domain.StatusCooldown), result.Reason, config.Version)
+}
+
+type EvaluateTestingCmd struct {
+	MAEID             string
+	TxnCount          int32
+	SuccessRateBps    int32
+	AbnormalRateBps   int32
+	P95LatencyMs      int32
+	CardTestingCount  int32
+}
+
+func (s *Service) EvaluateTesting(ctx context.Context, cmd EvaluateTestingCmd) (domain.TestingResult, error) {
+	config, err := s.repo.GetConfigByMAEID(ctx, cmd.MAEID)
+	if err != nil {
+		return domain.TestingResult{}, err
+	}
+	if config == nil {
+		return domain.TestingResult{}, apperr.ErrNotFound.WithMessage("MAE not found: " + cmd.MAEID)
+	}
+
+	if domain.MAEStatus(config.Status) != domain.StatusTesting {
+		return domain.TestingResult{}, apperr.ErrIllegalTransition.WithMessage("MAE not in Testing status")
+	}
+
+	result := domain.EvaluateTesting(domain.TestingInput{
+		TxnCount:              cmd.TxnCount,
+		TestingMinTxnCount:    config.TestingMinTxnCount,
+		SuccessRateBps:        cmd.SuccessRateBps,
+		TestingMinSuccessRate: config.TestingMinSuccessRateBps,
+		AbnormalRateBps:       cmd.AbnormalRateBps,
+		CmaxBps:               config.CmaxBps,
+		P95LatencyMs:          cmd.P95LatencyMs,
+		TestingMaxP95Latency:  config.TestingMaxP95LatencyMs,
+		CardTestingCount:      cmd.CardTestingCount,
+	})
+
+	if err := s.repo.UpdateStatus(ctx, config.ID, string(result.TargetStatus), result.Reason, config.Version); err != nil {
+		return domain.TestingResult{}, err
+	}
+
+	return result, nil
+}

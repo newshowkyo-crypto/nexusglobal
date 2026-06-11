@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T023`（MAE 熔断+Testing service）
-- **当前阶段**：P3 MAE（T019-T022 完成，T023-T024 待做）
-- **上一轮做了什么**：T022 完成——queries.sql（InsertMAEConfig/GetMAEConfig/UpdateMAEStatus 乐观锁/RotateMAESecret/InsertMAESnapshot）；repository.go；service.go（Create 加密凭证入库、ChangeStatus 校验 CanTransition、GetConfig、ListConfigs）。
+- **下一个要做的任务**：`T024`（MAE handler）
+- **当前阶段**：P3 MAE（T019-T023 完成，T024 待做）
+- **上一轮做了什么**：T023 完成——service.EvaluateCircuitBreaker（读 Redis exposure、调 domain.EvaluateCircuitBreaker、ShouldTrip→Active→Cooldown + reason）；service.EvaluateTesting（校验 Testing 状态、调 domain.EvaluateTesting、PROMOTE→Active/HOLD→Cooldown/SUSPEND→Suspended）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
