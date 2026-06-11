@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T029`（核心消费者 入账）
-- **当前阶段**：P4 Webhook（T025-T028 完成，T029 待做）
-- **上一轮做了什么**：T028 完成——webhook handler（HandleMAE/HandleBank/HandleLP 三入口、验签→payload_hash→idempotency_key→快速 ACK、POST /webhook/{mae,bank,lp}/{provider_id}、GET /admin/webhook/events、POST /admin/webhook/events/{id}/replay + 测试）。
+- **下一个要做的任务**：`T030`（Treasury migration）
+- **当前阶段**：P4 Webhook 完成（T025-T029 全部完成），进入 P5 Treasury
+- **上一轮做了什么**：T029 完成——consumer.Consumer（从 Streams 消费→idempotency check→handleFinancialEvent→调 ledger.Post→幂等重放跳过→成功 ACK；handleMessage 按 eventType 路由 captured/settled/refund/dispute/payout_confirmed/lp_callback）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
