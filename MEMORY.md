@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T011`（Ledger repository sqlc + queries）
-- **当前阶段**：P1 Ledger（T009-T010 完成，T011-T012 待做）
-- **上一轮做了什么**：T010 完成——Direction(DEBIT/CREDIT)、AccountType 6 枚举（SETTLED/PENDING/RESERVE/FROZEN_PAYOUT/DISPUTE_HOLD/EXTERNAL_PAYOUT_SETTLEMENT）、TransactionType 4 枚举、Entry/Transaction 结构体、ValidateBalanced 借贷平衡校验（空/零/负/奇数/不平衡/方向非法/多对/精度全覆盖）。
+- **下一个要做的任务**：`T012`（Ledger service 幂等入账）
+- **当前阶段**：P1 Ledger（T009-T011 完成，T012 待做）
+- **上一轮做了什么**：T011 完成——queries.sql（InsertLedgerAccount/InsertLedgerTransaction with ON CONFLICT DO NOTHING/InsertLedgerEntry/ListEntries 等 8 个查询）、sqlc generate 成功、repository.go 封装（PostTransaction 事务内写 transaction+entries、GetTransactionByIdempotencyKey 幂等查询）。sqlc.yaml 更新 queries 路径为 `internal/ledger`，输出到 `internal/ledger/repository/db`。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
