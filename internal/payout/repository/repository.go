@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"math/big"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -65,7 +66,7 @@ func (r *Repository) UpdateBalance(ctx context.Context, tx pgx.Tx, b *Balance) e
 	q := db.New(r.pool).WithTx(tx)
 	return q.UpdateBalance(ctx, db.UpdateBalanceParams{
 		ID:                     b.ID,
-		PendingBalance:         pgtype.Numeric{},
+		PendingBalance:         pgtype.Numeric{Int: big.NewInt(0), Exp: 0, Valid: true},
 		SettledBalance:         decimalToNumeric(b.SettledBalance),
 		ReserveBalance:         decimalToNumeric(b.ReserveBalance),
 		FrozenPayoutBalance:    decimalToNumeric(b.FrozenPayoutBalance),
@@ -158,11 +159,9 @@ func numericToDecimal(n pgtype.Numeric) decimal.Decimal {
 }
 
 func decimalToNumeric(d decimal.Decimal) pgtype.Numeric {
-	return pgtype.Numeric{
-		Int:   d.Coefficient(),
-		Exp:   -int32(d.Exponent()),
-		Valid: true,
-	}
+	var n pgtype.Numeric
+	_ = n.Scan(d.StringFixed(4))
+	return n
 }
 
 type LedgerRepo struct {
@@ -171,6 +170,30 @@ type LedgerRepo struct {
 
 func NewLedgerRepo(pool *pgxpool.Pool) *LedgerRepo {
 	return &LedgerRepo{pool: pool}
+}
+
+func (r *LedgerRepo) GetOrCreateAccount(ctx context.Context, tx pgx.Tx, merchantID uuid.UUID, accountType, currency string) (uuid.UUID, error) {
+	q := ledgerdb.New(r.pool).WithTx(tx)
+
+	account, err := q.GetLedgerAccountByMerchant(ctx, ledgerdb.GetLedgerAccountByMerchantParams{
+		MerchantID:  merchantID,
+		AccountType: accountType,
+		Currency:    currency,
+	})
+	if err == nil {
+		return account.ID, nil
+	}
+
+	newAcc, err := q.InsertLedgerAccount(ctx, ledgerdb.InsertLedgerAccountParams{
+		MerchantID:  merchantID,
+		AccountType: accountType,
+		Currency:    currency,
+		Description: accountType + " account for " + merchantID.String(),
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return newAcc.ID, nil
 }
 
 func (r *LedgerRepo) PostTransaction(ctx context.Context, tx pgx.Tx, txn ledgerdomain.Transaction) (*ledgerdomain.Transaction, error) {

@@ -47,6 +47,7 @@ type PayoutRepository interface {
 
 type LedgerRepository interface {
 	PostTransaction(ctx context.Context, tx pgx.Tx, txn ledgerdomain.Transaction) (*ledgerdomain.Transaction, error)
+	GetOrCreateAccount(ctx context.Context, tx pgx.Tx, merchantID uuid.UUID, accountType, currency string) (uuid.UUID, error)
 }
 
 type Service struct {
@@ -101,25 +102,19 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 			return fmt.Errorf("update balance: %w", err)
 		}
 
-		_, err = s.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
-			IdempotencyKey:  "payout_freeze:" + cmd.PayoutRequestID.String(),
-			TransactionType: ledgerdomain.TxnTypePayoutFreeze,
-			AggregateType:   "payout_request",
-			AggregateID:     cmd.PayoutRequestID.String(),
-			Description:     fmt.Sprintf("Payout freeze %s %s", cmd.Amount.String(), cmd.FiatCurrency),
-			Entries: []ledgerdomain.Entry{
-				{AccountID: "settled", Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
-				{AccountID: "frozen_payout", Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
-			},
-		})
+		settledAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "SETTLED", cmd.FiatCurrency)
 		if err != nil {
-			return fmt.Errorf("ledger post: %w", err)
+			return fmt.Errorf("get settled account: %w", err)
+		}
+		frozenAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "FROZEN_PAYOUT", cmd.FiatCurrency)
+		if err != nil {
+			return fmt.Errorf("get frozen account: %w", err)
 		}
 
 		payoutReq, err := s.repo.InsertPayoutRequest(ctx, tx, db.InsertPayoutRequestParams{
 			MerchantID:      cmd.MerchantID,
 			PayoutAddressID: cmd.PayoutAddressID,
-			Amount:          pgtype.Numeric{Int: cmd.Amount.Coefficient(), Exp: -int32(cmd.Amount.Exponent()), Valid: true},
+			Amount:          decimalToNumeric(cmd.Amount),
 			FiatCurrency:    cmd.FiatCurrency,
 			TargetAsset:     cmd.TargetAsset,
 			TargetNetwork:   cmd.TargetNetwork,
@@ -128,6 +123,21 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 		})
 		if err != nil {
 			return fmt.Errorf("insert payout request: %w", err)
+		}
+
+		_, err = s.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
+			IdempotencyKey:  "payout_freeze:" + payoutReq.ID.String(),
+			TransactionType: ledgerdomain.TxnTypePayoutFreeze,
+			AggregateType:   "payout_request",
+			AggregateID:     payoutReq.ID.String(),
+			Description:     fmt.Sprintf("Payout freeze %s %s", cmd.Amount.String(), cmd.FiatCurrency),
+			Entries: []ledgerdomain.Entry{
+				{AccountID: settledAccID.String(), Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
+				{AccountID: frozenAccID.String(), Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("ledger post: %w", err)
 		}
 
 		outboxPayload, _ := json.Marshal(map[string]string{
