@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T014**
-- 已完成：13 / 38
+- 当前进度指针：**T015**
+- 已完成：14 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T013 Payout/Outbox migration 完成
+- 最近更新：T014 Payout domain 完成
 
 ---
 
@@ -43,7 +43,7 @@
 | 任务 | 状态 | 依赖 | 完成时间 | 提交号 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | T013 payout/outbox migration | ✅ | T003 | 2026-06-12 | | |
-| T014 payout domain | ⬜ | T008 | | | |
+| T014 payout domain | ✅ | T008 | 2026-06-12 | | |
 | T015 payout repository | ⬜ | T013,T014 | | | |
 | T016 payout freeze service (Phase1) | ⬜ | T015,T012 | | | 并发双花测试 |
 | T017 outbox+fxlock worker (Phase2) | ⬜ | T016,T008,T004 | | | |
