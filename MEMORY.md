@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T016`（Payout service 冻结事务 + Outbox）
-- **当前阶段**：P2 Payout（T013-T015 完成，T016-T018 待做）
-- **上一轮做了什么**：T015 完成——queries.sql（LockBalanceForUpdate FOR UPDATE、UpdateBalance、InsertPayoutRequest、GetPayoutRequest、UpdatePayoutRequestStatus、InsertOutboxEvent、ClaimOutboxBatch SKIP LOCKED、AckOutboxEvent、FailOutboxEvent）；repository.go（Balance struct、LockBalanceForUpdate、UpdateBalance、InsertPayoutRequest、GetPayoutRequest、InsertOutboxEvent、ClaimOutboxBatch）；sqlc.yaml 更新支持多模块。
+- **下一个要做的任务**：`T017`（Outbox Worker + FX Lock Worker）
+- **当前阶段**：P2 Payout（T013-T016 完成，T017-T018 待做）
+- **上一轮做了什么**：T016 完成——service.Freeze 实现 TDD §5.3 Phase1（FOR UPDATE→校验 available→扣 settled/加 frozen→写 Outbox FX_LOCK_REQUESTED、事务内零外部 I/O、余额不足回滚不写 Outbox）；handler（CreateAddress、CreatePayoutRequest、Freeze 端点 + 测试）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---

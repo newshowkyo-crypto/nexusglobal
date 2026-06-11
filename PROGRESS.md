@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T016**
-- 已完成：15 / 38
+- 当前进度指针：**T017**
+- 已完成：16 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T015 Payout repository 完成
+- 最近更新：T016 Payout service 完成
 
 ---
 
@@ -45,7 +45,7 @@
 | T013 payout/outbox migration | ✅ | T003 | 2026-06-12 | | |
 | T014 payout domain | ✅ | T008 | 2026-06-12 | | |
 | T015 payout repository | ✅ | T013,T014 | 2026-06-12 | | |
-| T016 payout freeze service (Phase1) | ⬜ | T015,T012 | | | 并发双花测试 |
+| T016 payout freeze service (Phase1) | ✅ | T015,T012 | 2026-06-12 | | 并发双花测试 |
 | T017 outbox+fxlock worker (Phase2) | ⬜ | T016,T008,T004 | | | |
 | T018 lp payout worker (Phase3/4/5) | ⬜ | T017 | | | 五阶段闭环 |
 
