@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/nexusglobal/mamr/internal/mae/domain"
 	"github.com/nexusglobal/mamr/internal/mae/service"
@@ -29,12 +30,65 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, CreateMAEResponse{ID: "stub-id", Status: "Draft"})
 		return
 	}
-	var req service.CreateMAECmd
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var raw struct {
+		MAEID                    string   `json:"mae_id"`
+		DisplayName              string   `json:"display_name"`
+		MAEType                  string   `json:"mae_type"`
+		TenantScope              []string `json:"tenant_scope"`
+		Jurisdiction             string   `json:"jurisdiction"`
+		SupportedCurrencies      []string `json:"supported_currencies"`
+		APIBaseURL               string   `json:"api_base_url"`
+		APIKey                   string   `json:"api_key"`
+		WebhookSecret            string   `json:"webhook_secret"`
+		WebhookProxyURL          string   `json:"webhook_proxy_url"`
+		RiskLabel                string   `json:"risk_label"`
+		SettlementBankAccountID  string   `json:"settlement_bank_account_id"`
+		DailyVmaxMinor           int64    `json:"daily_vmax_minor"`
+		MonthlyVmaxMinor         int64    `json:"monthly_vmax_minor"`
+		CmaxBps                  int32    `json:"cmax_bps"`
+		CardTestingLimit         int32    `json:"card_testing_limit"`
+		RoutingWeight            int32    `json:"routing_weight"`
+		CooldownMinutes          int32    `json:"cooldown_minutes"`
+		TestingTrafficBps        int32    `json:"testing_traffic_bps"`
+		TestingMinTxnCount       int32    `json:"testing_min_txn_count"`
+		TestingMinSuccessRateBps int32    `json:"testing_min_success_rate_bps"`
+		TestingMaxP95LatencyMs   int32    `json:"testing_max_p95_latency_ms"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
 		return
 	}
-	result, err := h.svc.Create(r.Context(), req)
+
+	tenantScopeJSON, _ := json.Marshal(raw.TenantScope)
+	currenciesJSON, _ := json.Marshal(raw.SupportedCurrencies)
+	settlementID, _ := uuid.Parse(raw.SettlementBankAccountID)
+
+	cmd := service.CreateMAECmd{
+		MAEID:                    raw.MAEID,
+		DisplayName:              raw.DisplayName,
+		MAEType:                  raw.MAEType,
+		TenantScope:              tenantScopeJSON,
+		Jurisdiction:             raw.Jurisdiction,
+		SupportedCurrencies:      currenciesJSON,
+		APIBaseURL:               raw.APIBaseURL,
+		APIKey:                   raw.APIKey,
+		WebhookSecret:            raw.WebhookSecret,
+		WebhookProxyURL:          raw.WebhookProxyURL,
+		RiskLabel:                raw.RiskLabel,
+		SettlementBankAccountID:  settlementID,
+		DailyVmaxMinor:           raw.DailyVmaxMinor,
+		MonthlyVmaxMinor:         raw.MonthlyVmaxMinor,
+		CmaxBps:                  raw.CmaxBps,
+		CardTestingLimit:         raw.CardTestingLimit,
+		RoutingWeight:            raw.RoutingWeight,
+		CooldownMinutes:          raw.CooldownMinutes,
+		TestingTrafficBps:        raw.TestingTrafficBps,
+		TestingMinTxnCount:       raw.TestingMinTxnCount,
+		TestingMinSuccessRateBps: raw.TestingMinSuccessRateBps,
+		TestingMaxP95LatencyMs:   raw.TestingMaxP95LatencyMs,
+	}
+
+	result, err := h.svc.Create(r.Context(), cmd)
 	if err != nil {
 		writeAppErr(w, err)
 		return
