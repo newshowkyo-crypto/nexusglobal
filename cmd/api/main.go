@@ -61,6 +61,7 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(httpx.RequestID)
+	r.Use(httpx.RequestLogger(log))
 	r.Use(httpx.Recover(log))
 
 	kms, _ := crypto.NewMockKMS(cfg.MasterKeyBase64)
@@ -112,6 +113,8 @@ func main() {
 
 	r.Get("/healthz", httpx.HealthCheck(dbPing, redisPing))
 	r.Get("/readyz", httpx.ReadinessCheck(dbPing, redisPing))
+	r.Get("/admin/dashboard", httpx.AdminDashboardHTML(pool, rdb, cfg.AppEnv))
+	r.Get("/admin/dashboard/data", httpx.DashboardHandler(pool, rdb, cfg.AppEnv))
 
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(httpx.AdminAuth)
