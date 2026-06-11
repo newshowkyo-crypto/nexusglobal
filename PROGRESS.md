@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T012**
-- 已完成：11 / 38
+- 当前进度指针：**T013**
+- 已完成：12 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T011 Ledger repository 完成
+- 最近更新：T012 Ledger service 完成
 
 ---
 
@@ -37,7 +37,7 @@
 | T009 ledger migration | ✅ | T003 | 2026-06-12 | | |
 | T010 ledger domain | ✅ | T005 | 2026-06-12 | | |
 | T011 ledger repository | ✅ | T009,T010 | 2026-06-12 | | |
-| T012 ledger service | ⬜ | T011,T006 | | | |
+| T012 ledger service | ✅ | T011,T006 | 2026-06-12 | | |
 
 ### P2 Payout 冻结 + Outbox + Worker
 | 任务 | 状态 | 依赖 | 完成时间 | 提交号 | 备注 |
