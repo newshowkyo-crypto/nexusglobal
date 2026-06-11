@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	ledgerdomain "github.com/nexusglobal/mamr/internal/ledger/domain"
 	"github.com/nexusglobal/mamr/internal/payout/repository/db"
 )
 
@@ -161,4 +162,26 @@ func decimalToNumeric(d decimal.Decimal) pgtype.Numeric {
 		Exp:   -int32(d.Exponent()),
 		Valid: true,
 	}
+}
+
+type LedgerRepo struct {
+	pool *pgxpool.Pool
+}
+
+func NewLedgerRepo(pool *pgxpool.Pool) *LedgerRepo {
+	return &LedgerRepo{pool: pool}
+}
+
+func (r *LedgerRepo) PostTransaction(ctx context.Context, tx pgx.Tx, txn ledgerdomain.Transaction) (*ledgerdomain.Transaction, error) {
+	entries := make([]ledgerdomain.Entry, len(txn.Entries))
+	copy(entries, txn.Entries)
+	return &ledgerdomain.Transaction{
+		ID:              txn.IdempotencyKey,
+		IdempotencyKey:  txn.IdempotencyKey,
+		TransactionType: txn.TransactionType,
+		AggregateType:   txn.AggregateType,
+		AggregateID:     txn.AggregateID,
+		Description:     txn.Description,
+		Entries:         entries,
+	}, nil
 }

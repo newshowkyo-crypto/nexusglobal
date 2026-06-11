@@ -1,27 +1,29 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
+	"github.com/nexusglobal/mamr/internal/payout/domain"
+	"github.com/nexusglobal/mamr/internal/payout/service"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
 )
 
-type Handler struct{}
-
-func New() *Handler {
-	return &Handler{}
+type PayoutService interface {
+	Freeze(ctx context.Context, cmd service.FreezeCmd) (service.FreezeResult, error)
 }
 
-type CreateAddressRequest struct {
-	TargetAsset       string `json:"target_asset"`
-	TargetNetwork     string `json:"target_network"`
-	AddressFormatType string `json:"address_format_type"`
-	TargetAddress     string `json:"target_address"`
-	AddressLabel      string `json:"address_label"`
+type Handler struct {
+	svc PayoutService
+}
+
+func New(svc PayoutService) *Handler {
+	return &Handler{svc: svc}
 }
 
 type CreateAddressResponse struct {
@@ -32,19 +34,22 @@ type CreateAddressResponse struct {
 }
 
 func (h *Handler) CreateAddress(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TargetAsset       string `json:"target_asset"`
+		TargetNetwork     string `json:"target_network"`
+		AddressFormatType string `json:"address_format_type"`
+		TargetAddress     string `json:"target_address"`
+		AddressLabel      string `json:"address_label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
 	writeJSON(w, http.StatusCreated, CreateAddressResponse{
 		ID:              uuid.New().String(),
 		ScreeningStatus: "Pending",
 		WhitelistStatus: "Pending",
 	})
-}
-
-type CreatePayoutRequest struct {
-	PayoutAddressID string `json:"payout_address_id"`
-	Amount          string `json:"amount"`
-	FiatCurrency    string `json:"fiat_currency"`
-	TargetAsset     string `json:"target_asset"`
-	TargetNetwork   string `json:"target_network"`
 }
 
 type CreatePayoutResponse struct {
@@ -54,23 +59,94 @@ type CreatePayoutResponse struct {
 }
 
 func (h *Handler) CreatePayoutRequest(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusCreated, CreatePayoutResponse{
-		ID:     uuid.New().String(),
-		Status: "Draft",
-	})
-}
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	if idempotencyKey == "" {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("Idempotency-Key header required"))
+		return
+	}
 
-type FreezeResponse struct {
-	Status string `json:"status"`
+	var req struct {
+		PayoutAddressID string `json:"payout_address_id"`
+		Amount          string `json:"amount"`
+		FiatCurrency    string `json:"fiat_currency"`
+		TargetAsset     string `json:"target_asset"`
+		TargetNetwork   string `json:"target_network"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, CreatePayoutResponse{
+		ID:             uuid.New().String(),
+		Status:         string(domain.StatusDraft),
+		IdempotencyKey: idempotencyKey,
+	})
 }
 
 func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
-	if _, err := uuid.Parse(idStr); err != nil {
+	payoutID, err := uuid.Parse(idStr)
+	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
 		return
 	}
-	writeJSON(w, http.StatusOK, FreezeResponse{Status: "BalanceFrozen"})
+
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
+		return
+	}
+
+	var req struct {
+		MerchantID      string `json:"merchant_id"`
+		Amount          string `json:"amount"`
+		FiatCurrency    string `json:"fiat_currency"`
+		PayoutAddressID string `json:"payout_address_id"`
+		TargetAsset     string `json:"target_asset"`
+		TargetNetwork   string `json:"target_network"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+
+	merchantID, err := uuid.Parse(req.MerchantID)
+	if err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid merchant_id"))
+		return
+	}
+
+	amount, err := decimal.NewFromString(req.Amount)
+	if err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid amount"))
+		return
+	}
+
+	addrID, _ := uuid.Parse(req.PayoutAddressID)
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	if idempotencyKey == "" {
+		idempotencyKey = "freeze:" + payoutID.String()
+	}
+
+	result, err := h.svc.Freeze(r.Context(), service.FreezeCmd{
+		PayoutRequestID: payoutID,
+		MerchantID:      merchantID,
+		Amount:          amount,
+		FiatCurrency:    req.FiatCurrency,
+		PayoutAddressID: addrID,
+		TargetAsset:     req.TargetAsset,
+		TargetNetwork:   req.TargetNetwork,
+		IdempotencyKey:  idempotencyKey,
+	})
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"payout_request_id": result.PayoutRequestID,
+		"status":            result.Status,
+	})
 }
 
 func (h *Handler) FxLock(w http.ResponseWriter, r *http.Request) {
@@ -115,4 +191,12 @@ func writeError(w http.ResponseWriter, err *apperr.Error) {
 			"message": err.Message,
 		},
 	})
+}
+
+func writeAppErr(w http.ResponseWriter, err error) {
+	if appErr, ok := apperr.AsAPIError(err); ok {
+		writeError(w, appErr)
+		return
+	}
+	writeError(w, apperr.ErrInternal.WithMessage(err.Error()))
 }

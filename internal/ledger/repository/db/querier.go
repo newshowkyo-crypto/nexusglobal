@@ -14,6 +14,7 @@ type Querier interface {
 	GetLedgerAccount(ctx context.Context, id uuid.UUID) (LedgerAccount, error)
 	GetLedgerAccountByMerchant(ctx context.Context, arg GetLedgerAccountByMerchantParams) (LedgerAccount, error)
 	GetLedgerTransactionByIdempotencyKey(ctx context.Context, idempotencyKey string) (LedgerTransaction, error)
+	GetMerchantTreasuryLedger(ctx context.Context, arg GetMerchantTreasuryLedgerParams) (MerchantTreasuryLedger, error)
 	InsertLedgerAccount(ctx context.Context, arg InsertLedgerAccountParams) (LedgerAccount, error)
 	InsertLedgerEntry(ctx context.Context, arg InsertLedgerEntryParams) (LedgerEntry, error)
 	InsertLedgerTransaction(ctx context.Context, arg InsertLedgerTransactionParams) (LedgerTransaction, error)

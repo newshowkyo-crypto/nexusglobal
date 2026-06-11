@@ -16,7 +16,11 @@ import (
 	"github.com/nexusglobal/mamr/internal/ledger/handler"
 	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
 	maehandler "github.com/nexusglobal/mamr/internal/mae/handler"
+	maerepo "github.com/nexusglobal/mamr/internal/mae/repository"
+	maeservice "github.com/nexusglobal/mamr/internal/mae/service"
 	payouthandler "github.com/nexusglobal/mamr/internal/payout/handler"
+	payoutrepo "github.com/nexusglobal/mamr/internal/payout/repository"
+	payoutservice "github.com/nexusglobal/mamr/internal/payout/service"
 	"github.com/nexusglobal/mamr/internal/platform/config"
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
 	"github.com/nexusglobal/mamr/internal/platform/httpx"
@@ -24,6 +28,9 @@ import (
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
 	"github.com/nexusglobal/mamr/internal/platform/stream"
 	treasuryhandler "github.com/nexusglobal/mamr/internal/treasury/handler"
+	treasuryrepo "github.com/nexusglobal/mamr/internal/treasury/repository"
+	"github.com/nexusglobal/mamr/internal/treasury/scheduler"
+	treasuryservice "github.com/nexusglobal/mamr/internal/treasury/service"
 	webhookhandler "github.com/nexusglobal/mamr/internal/webhook/handler"
 	webhookrepo "github.com/nexusglobal/mamr/internal/webhook/repository"
 )
@@ -40,12 +47,13 @@ func main() {
 
 	pool, pgErr := postgres.NewPool(ctx, cfg.PostgresDSN)
 	if pgErr != nil {
-		log.Warn("postgres unavailable, stub mode", "err", pgErr)
+		log.Error("postgres unavailable", "err", pgErr)
+		os.Exit(1)
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Warn("redis unavailable, stub mode", "err", err)
+		log.Warn("redis unavailable, some features disabled", "err", err)
 		rdb = nil
 	}
 
@@ -54,52 +62,44 @@ func main() {
 	r.Use(httpx.RequestID)
 	r.Use(httpx.Recover(log))
 
-	var ledgerH *handler.Handler
-	var maeH *maehandler.Handler
-	var payoutH *payouthandler.Handler
+	kms, _ := crypto.NewMockKMS(cfg.MasterKeyBase64)
+	var enc *crypto.Encryptor
+	if kms != nil {
+		enc = crypto.NewEncryptor(kms)
+	}
+
+	queries := db.New(pool)
+	ledgerH := handler.New(queries)
+
+	payoutRepo := payoutrepo.New(pool)
+	ledgerRepo := payoutrepo.NewLedgerRepo(pool)
+	txm := postgres.NewTxManager(pool)
+	payoutSvc := payoutservice.New(payoutRepo, ledgerRepo, txm, pool)
+	payoutH := payouthandler.New(payoutSvc)
+
+	maeRepo := maerepo.New(pool)
+	maeSvc := maeservice.New(maeRepo, enc, pool)
+	maeH := maehandler.New(maeSvc)
+
 	var webhookH *webhookhandler.Handler
-	var treasuryH *treasuryhandler.Handler
-
-	if pool != nil {
-		queries := db.New(pool)
-		ledgerH = handler.New(queries)
-
-		kms, _ := crypto.NewMockKMS(cfg.MasterKeyBase64)
-		var enc *crypto.Encryptor
-		if kms != nil {
-			enc = crypto.NewEncryptor(kms)
-		}
-
-		maeH = maehandler.New(nil)
-		payoutH = payouthandler.New()
-
-		if rdb != nil {
-			producer := stream.NewProducer(rdb)
-			webhookRepo := webhookrepo.New(pool)
-			webhookH = webhookhandler.New(webhookRepo, producer, enc)
-		}
+	var producer *stream.Producer
+	if rdb != nil {
+		producer = stream.NewProducer(rdb)
+		webhookRepoInst := webhookrepo.New(pool)
+		webhookH = webhookhandler.New(webhookRepoInst, producer, enc)
+	} else {
+		webhookH = webhookhandler.New(nil, nil, enc)
 	}
 
-	if ledgerH == nil {
-		ledgerH = handler.New(nil)
+	treasuryRepoInst := treasuryrepo.New(pool)
+	var delayQ *scheduler.DelayQueue
+	if rdb != nil {
+		delayQ = scheduler.NewDelayQueue(rdb, "SWEEP_DELAY")
 	}
-	if maeH == nil {
-		maeH = maehandler.New(nil)
-	}
-	if payoutH == nil {
-		payoutH = payouthandler.New()
-	}
-	if webhookH == nil {
-		webhookH = webhookhandler.New(nil, nil, nil)
-	}
-	treasuryH = treasuryhandler.New()
+	treasurySvc := treasuryservice.New(treasuryRepoInst, nil, txm, pool, delayQ, log)
+	treasuryH := treasuryhandler.New(treasurySvc)
 
-	dbPing := func() error {
-		if pool == nil {
-			return http.ErrServerClosed
-		}
-		return pool.Ping(context.Background())
-	}
+	dbPing := func() error { return pool.Ping(context.Background()) }
 	redisPing := func() error {
 		if rdb == nil {
 			return http.ErrServerClosed

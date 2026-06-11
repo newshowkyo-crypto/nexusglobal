@@ -40,3 +40,7 @@ ORDER BY created_at;
 SELECT * FROM ledger_entry
 WHERE account_id = $1
 ORDER BY created_at;
+
+-- name: GetMerchantTreasuryLedger :one
+SELECT * FROM merchant_treasury_ledger
+WHERE merchant_id = $1 AND currency = $2;

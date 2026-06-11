@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -49,18 +50,23 @@ func HealthCheck(dbPing func() error, redisPing func() error) http.HandlerFunc {
 
 func ReadinessCheck(dbPing func() error, redisPing func() error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var failures []string
+
 		if err := dbPing(); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"error":{"code":"NOT_READY","message":"database unreachable"}}`))
-			return
+			failures = append(failures, "database: "+err.Error())
 		}
 		if err := redisPing(); err != nil {
+			failures = append(failures, "redis: "+err.Error())
+		}
+
+		if len(failures) > 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"error":{"code":"NOT_READY","message":"redis unreachable"}}`))
+			msg := strings.Join(failures, "; ")
+			w.Write([]byte(`{"error":{"code":"NOT_READY","message":"` + msg + `"}}`))
 			return
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ready"}`))

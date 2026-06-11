@@ -76,6 +76,35 @@ func (q *Queries) GetLedgerTransactionByIdempotencyKey(ctx context.Context, idem
 	return i, err
 }
 
+const getMerchantTreasuryLedger = `-- name: GetMerchantTreasuryLedger :one
+SELECT id, merchant_id, currency, pending_balance, settled_balance, reserve_balance, frozen_payout_balance, dispute_hold_balance, available_payout_balance, version, updated_at FROM merchant_treasury_ledger
+WHERE merchant_id = $1 AND currency = $2
+`
+
+type GetMerchantTreasuryLedgerParams struct {
+	MerchantID uuid.UUID `json:"merchant_id"`
+	Currency   string    `json:"currency"`
+}
+
+func (q *Queries) GetMerchantTreasuryLedger(ctx context.Context, arg GetMerchantTreasuryLedgerParams) (MerchantTreasuryLedger, error) {
+	row := q.db.QueryRow(ctx, getMerchantTreasuryLedger, arg.MerchantID, arg.Currency)
+	var i MerchantTreasuryLedger
+	err := row.Scan(
+		&i.ID,
+		&i.MerchantID,
+		&i.Currency,
+		&i.PendingBalance,
+		&i.SettledBalance,
+		&i.ReserveBalance,
+		&i.FrozenPayoutBalance,
+		&i.DisputeHoldBalance,
+		&i.AvailablePayoutBalance,
+		&i.Version,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertLedgerAccount = `-- name: InsertLedgerAccount :one
 INSERT INTO ledger_account (merchant_id, account_type, currency, description)
 VALUES ($1, $2, $3, $4)

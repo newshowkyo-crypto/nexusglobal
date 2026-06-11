@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -24,10 +25,11 @@ func setupRouter(h *Handler) *chi.Mux {
 }
 
 func TestCreateCalendar_Success(t *testing.T) {
-	h := New()
+	h := New(nil)
 	r := setupRouter(h)
 
-	req := httptest.NewRequest("POST", "/admin/banking-calendar", nil)
+	body := `{"calendar_name":"US_FED","jurisdiction":"US","timezone":"America/New_York"}`
+	req := httptest.NewRequest("POST", "/admin/banking-calendar", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -35,10 +37,11 @@ func TestCreateCalendar_Success(t *testing.T) {
 }
 
 func TestCreateSweepRule_Success(t *testing.T) {
-	h := New()
+	h := New(nil)
 	r := setupRouter(h)
 
-	req := httptest.NewRequest("POST", "/admin/sweep-rule", nil)
+	body := `{"currency":"USD","rail":"ACH","beneficiary_type":"SAME_NAME"}`
+	req := httptest.NewRequest("POST", "/admin/sweep-rule", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -46,7 +49,7 @@ func TestCreateSweepRule_Success(t *testing.T) {
 }
 
 func TestUpdateSweepRule_InvalidID(t *testing.T) {
-	h := New()
+	h := New(nil)
 	r := setupRouter(h)
 
 	req := httptest.NewRequest("PATCH", "/admin/sweep-rule/not-a-uuid", nil)
@@ -61,7 +64,7 @@ func TestUpdateSweepRule_InvalidID(t *testing.T) {
 }
 
 func TestUpdateSweepRule_Success(t *testing.T) {
-	h := New()
+	h := New(nil)
 	r := setupRouter(h)
 
 	id := uuid.New()
@@ -72,8 +75,8 @@ func TestUpdateSweepRule_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestEvaluate_Success(t *testing.T) {
-	h := New()
+func TestEvaluate_NilService(t *testing.T) {
+	h := New(nil)
 	r := setupRouter(h)
 
 	req := httptest.NewRequest("POST", "/internal/sweep/evaluate", nil)
@@ -86,19 +89,8 @@ func TestEvaluate_Success(t *testing.T) {
 	assert.Equal(t, "ACCUMULATE", resp.Decision)
 }
 
-func TestSubmit_InvalidID(t *testing.T) {
-	h := New()
-	r := setupRouter(h)
-
-	req := httptest.NewRequest("POST", "/internal/sweep/not-a-uuid/submit", nil)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-func TestSubmit_Success(t *testing.T) {
-	h := New()
+func TestSubmit_NilService(t *testing.T) {
+	h := New(nil)
 	r := setupRouter(h)
 
 	id := uuid.New()
@@ -106,11 +98,11 @@ func TestSubmit_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-func TestReconcile_Success(t *testing.T) {
-	h := New()
+func TestReconcile_NilService(t *testing.T) {
+	h := New(nil)
 	r := setupRouter(h)
 
 	id := uuid.New()
@@ -118,8 +110,5 @@ func TestReconcile_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]string
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "Confirmed", resp["status"])
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }

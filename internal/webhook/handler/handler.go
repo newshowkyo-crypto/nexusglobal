@@ -75,9 +75,11 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 	}
 
 	payloadHash := idempotency.PayloadHash(payload)
-	businessDate := ""
 	idempotencyKey := domain.ComputeIdempotencyKey(
-		providerType, providerID, providerEventID, "webhook", payloadHash, businessDate)
+		providerType, providerID, providerEventID, "webhook", payloadHash, "")
+
+	var ingressID string
+	var duplicated bool
 
 	if h.repo != nil {
 		existing, _ := h.repo.GetIngressEventByIdempotencyKey(r.Context(), idempotencyKey)
@@ -112,17 +114,17 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 
 		encryptedPayload := payload
 		if h.encryptor != nil {
-			enc, err := h.encryptor.Encrypt(r.Context(), payload, crypto.Meta{
+			enc, encErr := h.encryptor.Encrypt(r.Context(), payload, crypto.Meta{
 				TenantID:  providerType,
 				RecordID:  providerID,
 				FieldName: "raw_payload",
 			})
-			if err == nil {
+			if encErr == nil {
 				encryptedPayload = enc
 			}
 		}
 
-		ingress, err := h.repo.InsertIngressEvent(r.Context(), db.InsertIngressEventParams{
+		ingress, insertErr := h.repo.InsertIngressEvent(r.Context(), db.InsertIngressEventParams{
 			ProviderType:         providerType,
 			ProviderID:           providerID,
 			ProviderEventID:      providerEventID,
@@ -132,10 +134,11 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 			RawPayloadCiphertext: encryptedPayload,
 			Status:               string(domain.StatusReceived),
 		})
-		if err != nil {
+		if insertErr != nil {
 			writeError(w, apperr.ErrInternal.WithMessage("failed to write ingress"))
 			return
 		}
+		ingressID = ingress.ID.String()
 
 		if h.producer != nil {
 			h.producer.Publish(r.Context(), streamName, stream.Event{
@@ -144,23 +147,51 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 				ProviderID:     providerID,
 				EventType:      "webhook",
 				PayloadHash:    payloadHash,
-				IngressID:      ingress.ID.String(),
+				IngressID:      ingressID,
 			})
 		}
+	} else {
+		ingressID = uuid.New().String()
 	}
 
 	writeJSON(w, http.StatusOK, WebhookResponse{
 		Received:       true,
-		IngressID:      "stub-ingress-id",
+		IngressID:      ingressID,
 		IdempotencyKey: idempotencyKey,
+		Duplicated:     duplicated,
 	})
 }
 
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"events": []any{}})
+	if h.repo == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"events": []any{}})
+		return
+	}
+
+	providerType := r.URL.Query().Get("provider_type")
+	if providerType == "" {
+		providerType = "mae"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"events": []any{}, "provider_type": providerType})
 }
 
 func (h *Handler) Replay(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(idStr); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid event id"))
+		return
+	}
+
+	if h.repo != nil {
+		if h.producer != nil {
+			h.producer.Publish(r.Context(), "stream:webhook:lp", stream.Event{
+				IdempotencyKey: "replay:" + idStr,
+				EventType:      "replay",
+			})
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]bool{"replayed": true})
 }
 

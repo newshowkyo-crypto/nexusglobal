@@ -1,43 +1,60 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
+	"github.com/nexusglobal/mamr/internal/treasury/service"
 )
 
-type Handler struct{}
-
-func New() *Handler {
-	return &Handler{}
+type TreasuryService interface {
+	Evaluate(ctx context.Context, cmd service.EvaluateCmd) (service.EvaluateResult, error)
+	Submit(ctx context.Context, transferID uuid.UUID) error
+	Reconcile(ctx context.Context, transferID uuid.UUID, bankRef string) error
 }
 
-type CreateCalendarRequest struct {
-	CalendarName string `json:"calendar_name"`
-	Jurisdiction string `json:"jurisdiction"`
-	Timezone     string `json:"timezone"`
+type Handler struct {
+	svc TreasuryService
+}
+
+func New(svc TreasuryService) *Handler {
+	return &Handler{svc: svc}
 }
 
 func (h *Handler) CreateCalendar(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CalendarName string `json:"calendar_name"`
+		Jurisdiction string `json:"jurisdiction"`
+		Timezone     string `json:"timezone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"id":     uuid.New().String(),
 		"status": "Active",
 	})
 }
 
-type CreateSweepRuleRequest struct {
-	SourceBankAccountID string `json:"source_bank_account_id"`
-	TargetBankAccountID string `json:"target_bank_account_id"`
-	Currency            string `json:"currency"`
-	Rail                string `json:"rail"`
-	BeneficiaryType     string `json:"beneficiary_type"`
-}
-
 func (h *Handler) CreateSweepRule(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SourceBankAccountID string `json:"source_bank_account_id"`
+		TargetBankAccountID string `json:"target_bank_account_id"`
+		Currency            string `json:"currency"`
+		Rail                string `json:"rail"`
+		BeneficiaryType     string `json:"beneficiary_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":      uuid.New().String(),
 		"status":  "Active",
@@ -54,11 +71,6 @@ func (h *Handler) UpdateSweepRule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "Updated"})
 }
 
-type EvaluateRequest struct {
-	SweepRuleID string `json:"sweep_rule_id"`
-	AsOf        string `json:"as_of"`
-}
-
 type EvaluateResponse struct {
 	Decision        string `json:"decision"`
 	SweepTransferID string `json:"sweep_transfer_id,omitempty"`
@@ -66,27 +78,90 @@ type EvaluateResponse struct {
 }
 
 func (h *Handler) Evaluate(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeJSON(w, http.StatusOK, EvaluateResponse{Decision: "ACCUMULATE", Reason: "service not available"})
+		return
+	}
+
+	var req struct {
+		SweepRuleID string `json:"sweep_rule_id"`
+		AsOf        string `json:"as_of"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+
+	ruleID, err := uuid.Parse(req.SweepRuleID)
+	if err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid sweep_rule_id"))
+		return
+	}
+
+	asOf := time.Now().UTC()
+	if req.AsOf != "" {
+		asOf, err = time.Parse(time.RFC3339, req.AsOf)
+		if err != nil {
+			writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid as_of format"))
+			return
+		}
+	}
+
+	result, err := h.svc.Evaluate(r.Context(), service.EvaluateCmd{
+		SweepRuleID: ruleID,
+		AsOf:        asOf,
+	})
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, EvaluateResponse{
-		Decision: "ACCUMULATE",
-		Reason:   "below threshold",
+		Decision:        string(result.Decision),
+		SweepTransferID: result.TransferID,
+		Reason:          result.Reason,
 	})
 }
 
 func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("service not available"))
+		return
+	}
+
 	id := chi.URLParam(r, "id")
-	if _, err := uuid.Parse(id); err != nil {
+	transferID, err := uuid.Parse(id)
+	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid transfer id"))
 		return
 	}
+
+	if err := h.svc.Submit(r.Context(), transferID); err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "Submitted"})
 }
 
 func (h *Handler) Reconcile(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("service not available"))
+		return
+	}
+
 	id := chi.URLParam(r, "id")
-	if _, err := uuid.Parse(id); err != nil {
+	transferID, err := uuid.Parse(id)
+	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid transfer id"))
 		return
 	}
+
+	if err := h.svc.Reconcile(r.Context(), transferID, ""); err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "Confirmed"})
 }
 
@@ -105,4 +180,12 @@ func writeError(w http.ResponseWriter, err *apperr.Error) {
 			"message": err.Message,
 		},
 	})
+}
+
+func writeAppErr(w http.ResponseWriter, err error) {
+	if appErr, ok := apperr.AsAPIError(err); ok {
+		writeError(w, appErr)
+		return
+	}
+	writeError(w, apperr.ErrInternal.WithMessage(err.Error()))
 }

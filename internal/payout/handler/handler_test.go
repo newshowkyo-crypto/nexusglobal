@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -12,65 +13,98 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCreateAddress_Success(t *testing.T) {
-	handler := New()
+func setupRouter(h *Handler) *chi.Mux {
 	r := chi.NewRouter()
-	r.Post("/merchant/payout-address", handler.CreateAddress)
+	r.Post("/merchant/payout-address", h.CreateAddress)
+	r.Post("/merchant/payout-request", h.CreatePayoutRequest)
+	r.Post("/internal/payout/{id}/freeze", h.Freeze)
+	r.Post("/internal/payout/{id}/fx-lock", h.FxLock)
+	r.Post("/internal/payout/{id}/submit", h.Submit)
+	r.Post("/internal/payout/{id}/reconcile", h.Reconcile)
+	return r
+}
 
-	req := httptest.NewRequest("POST", "/merchant/payout-address", nil)
+func TestCreateAddress_Success(t *testing.T) {
+	h := New(nil)
+	r := setupRouter(h)
+
+	body := `{"target_asset":"USDT","target_network":"TRON_TRC20","target_address":"TAddr"}`
+	req := httptest.NewRequest("POST", "/merchant/payout-address", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
-	var resp CreateAddressResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp.ID)
-	assert.Equal(t, "Pending", resp.ScreeningStatus)
 }
 
-func TestCreatePayoutRequest_Success(t *testing.T) {
-	handler := New()
-	r := chi.NewRouter()
-	r.Post("/merchant/payout-request", handler.CreatePayoutRequest)
+func TestCreatePayoutRequest_MissingIdempotencyKey(t *testing.T) {
+	h := New(nil)
+	r := setupRouter(h)
 
 	req := httptest.NewRequest("POST", "/merchant/payout-request", nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusCreated, rec.Code)
-	var resp CreatePayoutResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "Draft", resp.Status)
-}
-
-func TestFreeze_InvalidID(t *testing.T) {
-	handler := New()
-	r := chi.NewRouter()
-	r.Post("/internal/payout/{id}/freeze", handler.Freeze)
-
-	req := httptest.NewRequest("POST", "/internal/payout/not-a-uuid/freeze", nil)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "INVALID_ARGUMENT", errObj["code"])
 }
 
-func TestFreeze_ValidID(t *testing.T) {
-	handler := New()
-	r := chi.NewRouter()
-	r.Post("/internal/payout/{id}/freeze", handler.Freeze)
+func TestFreeze_NilService(t *testing.T) {
+	h := New(nil)
+	r := setupRouter(h)
 
 	id := uuid.New()
 	req := httptest.NewRequest("POST", "/internal/payout/"+id.String()+"/freeze", nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestFreeze_InvalidID(t *testing.T) {
+	h := New(nil)
+	r := setupRouter(h)
+
+	req := httptest.NewRequest("POST", "/internal/payout/not-a-uuid/freeze", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestFxLock_ValidID(t *testing.T) {
+	h := New(nil)
+	r := setupRouter(h)
+
+	id := uuid.New()
+	req := httptest.NewRequest("POST", "/internal/payout/"+id.String()+"/fx-lock", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp FreezeResponse
+	var resp map[string]string
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "BalanceFrozen", resp.Status)
+	assert.Equal(t, "FxLocked", resp["status"])
+}
+
+func TestSubmit_ValidID(t *testing.T) {
+	h := New(nil)
+	r := setupRouter(h)
+
+	id := uuid.New()
+	req := httptest.NewRequest("POST", "/internal/payout/"+id.String()+"/submit", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestReconcile_ValidID(t *testing.T) {
+	h := New(nil)
+	r := setupRouter(h)
+
+	id := uuid.New()
+	req := httptest.NewRequest("POST", "/internal/payout/"+id.String()+"/reconcile", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
 }

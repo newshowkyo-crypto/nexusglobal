@@ -2,7 +2,6 @@ package consumer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -141,8 +140,4 @@ func PayloadHash(data []byte) string {
 
 func WebhookIdempotencyKey(providerType, providerID, providerEventID, eventType string) string {
 	return idempotency.WebhookIdempotencyKey(providerType, providerID, providerEventID, eventType)
-}
-
-func _() {
-	var _ = json.Marshal
 }

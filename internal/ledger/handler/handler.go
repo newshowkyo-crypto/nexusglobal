@@ -6,9 +6,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
-	"github.com/nexusglobal/mamr/internal/ledger/domain"
 	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
 )
@@ -50,26 +50,51 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		currency = "USD"
 	}
 
-	account, err := h.queries.GetLedgerAccountByMerchant(r.Context(), db.GetLedgerAccountByMerchantParams{
-		MerchantID:  merchantID,
-		AccountType: string(domain.AccountTypeSettled),
-		Currency:    currency,
+	account, err := h.queries.GetMerchantTreasuryLedger(r.Context(), db.GetMerchantTreasuryLedgerParams{
+		MerchantID: merchantID,
+		Currency:   currency,
 	})
 	if err != nil {
-		writeError(w, apperr.ErrNotFound.WithMessage("account not found"))
+		writeError(w, apperr.ErrNotFound.WithMessage("treasury ledger not found"))
 		return
 	}
+
+	pending := numericToDecimal(account.PendingBalance)
+	settled := numericToDecimal(account.SettledBalance)
+	reserve := numericToDecimal(account.ReserveBalance)
+	frozen := numericToDecimal(account.FrozenPayoutBalance)
+	dispute := numericToDecimal(account.DisputeHoldBalance)
+	available := settled.Sub(reserve).Sub(frozen).Sub(dispute)
 
 	writeJSON(w, http.StatusOK, BalanceResponse{
 		MerchantID:             account.MerchantID.String(),
 		Currency:               account.Currency,
-		PendingBalance:         decimal.Zero.String(),
-		SettledBalance:         decimal.Zero.String(),
-		ReserveBalance:         decimal.Zero.String(),
-		FrozenPayoutBalance:    decimal.Zero.String(),
-		DisputeHoldBalance:     decimal.Zero.String(),
-		AvailablePayoutBalance: decimal.Zero.String(),
+		PendingBalance:         pending.String(),
+		SettledBalance:         settled.String(),
+		ReserveBalance:         reserve.String(),
+		FrozenPayoutBalance:    frozen.String(),
+		DisputeHoldBalance:     dispute.String(),
+		AvailablePayoutBalance: available.String(),
 	})
+}
+
+func numericToDecimal(n pgtype.Numeric) decimal.Decimal {
+	if !n.Valid {
+		return decimal.Zero
+	}
+	d, _ := decimal.NewFromString(n.Int.String())
+	if n.Exp < 0 {
+		divisor := decimal.NewFromInt(1)
+		for i := int32(0); i < -n.Exp; i++ {
+			divisor = divisor.Mul(decimal.NewFromInt(10))
+		}
+		return d.Div(divisor)
+	}
+	multiplier := decimal.NewFromInt(1)
+	for i := int32(0); i < n.Exp; i++ {
+		multiplier = multiplier.Mul(decimal.NewFromInt(10))
+	}
+	return d.Mul(multiplier)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

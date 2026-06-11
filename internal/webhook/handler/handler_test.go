@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,12 +23,8 @@ func setupRouter(h *Handler) *chi.Mux {
 	return r
 }
 
-func newTestHandler() *Handler {
-	return New(nil, nil, nil)
-}
-
 func TestHandleMAE_MissingSignature(t *testing.T) {
-	h := newTestHandler()
+	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
 	req := httptest.NewRequest("POST", "/webhook/mae/prov_01", strings.NewReader(`{}`))
@@ -42,7 +39,7 @@ func TestHandleMAE_MissingSignature(t *testing.T) {
 }
 
 func TestHandleMAE_Success(t *testing.T) {
-	h := newTestHandler()
+	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
 	req := httptest.NewRequest("POST", "/webhook/mae/prov_01", strings.NewReader(`{"event":"captured"}`))
@@ -51,10 +48,14 @@ func TestHandleMAE_Success(t *testing.T) {
 	r.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp WebhookResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.True(t, resp.Received)
+	assert.NotEmpty(t, resp.IdempotencyKey)
 }
 
 func TestHandleBank_Success(t *testing.T) {
-	h := newTestHandler()
+	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
 	req := httptest.NewRequest("POST", "/webhook/bank/prov_01", strings.NewReader(`{}`))
@@ -66,7 +67,7 @@ func TestHandleBank_Success(t *testing.T) {
 }
 
 func TestHandleLP_Success(t *testing.T) {
-	h := newTestHandler()
+	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
 	req := httptest.NewRequest("POST", "/webhook/lp/prov_01", strings.NewReader(`{}`))
@@ -78,7 +79,7 @@ func TestHandleLP_Success(t *testing.T) {
 }
 
 func TestListEvents_Success(t *testing.T) {
-	h := newTestHandler()
+	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
 	req := httptest.NewRequest("GET", "/admin/webhook/events", nil)
@@ -89,10 +90,11 @@ func TestListEvents_Success(t *testing.T) {
 }
 
 func TestReplay_Success(t *testing.T) {
-	h := newTestHandler()
+	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
-	req := httptest.NewRequest("POST", "/admin/webhook/events/123/replay", nil)
+	id := uuid.New()
+	req := httptest.NewRequest("POST", "/admin/webhook/events/"+id.String()+"/replay", nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -100,4 +102,15 @@ func TestReplay_Success(t *testing.T) {
 	var resp map[string]bool
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.True(t, resp["replayed"])
+}
+
+func TestReplay_InvalidID(t *testing.T) {
+	h := New(nil, nil, nil)
+	r := setupRouter(h)
+
+	req := httptest.NewRequest("POST", "/admin/webhook/events/not-a-uuid/replay", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
