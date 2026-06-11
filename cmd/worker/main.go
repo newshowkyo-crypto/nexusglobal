@@ -28,13 +28,14 @@ func main() {
 
 	pool, pgErr := postgres.NewPool(ctx, cfg.PostgresDSN)
 	if pgErr != nil {
-		log.Warn("postgres unavailable", "err", pgErr)
+		log.Error("postgres unavailable", "err", pgErr)
+		os.Exit(1)
 	}
-	_ = pool
 
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Warn("redis unavailable", "err", err)
+		rdb = nil
 	}
 
 	log.Info("worker starting", "concurrency", cfg.OutboxWorkerConcurrency)
@@ -49,12 +50,17 @@ func main() {
 		log.Info("lp webhook consumer started")
 	}
 
+	log.Info("outbox worker would start here (requires service wiring)")
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Info("shutting down worker...")
 	cancel()
+	if pool != nil {
+		pool.Close()
+	}
 	if rdb != nil {
 		rdb.Close()
 	}

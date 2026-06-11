@@ -68,7 +68,8 @@ func TestUpdateSweepRule_Success(t *testing.T) {
 	r := setupRouter(h)
 
 	id := uuid.New()
-	req := httptest.NewRequest("PATCH", "/admin/sweep-rule/"+id.String(), nil)
+	body := `{"max_daily_sweep_count":3}`
+	req := httptest.NewRequest("PATCH", "/admin/sweep-rule/"+id.String(), strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 

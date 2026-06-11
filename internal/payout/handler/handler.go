@@ -45,6 +45,10 @@ func (h *Handler) CreateAddress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
 		return
 	}
+	if req.TargetAddress == "" {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("target_address required"))
+		return
+	}
 	writeJSON(w, http.StatusCreated, CreateAddressResponse{
 		ID:              uuid.New().String(),
 		ScreeningStatus: "Pending",
@@ -74,6 +78,16 @@ func (h *Handler) CreatePayoutRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+	if req.Amount == "" || req.FiatCurrency == "" {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("amount and fiat_currency required"))
+		return
+	}
+
+	_, err := decimal.NewFromString(req.Amount)
+	if err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid amount format"))
 		return
 	}
 

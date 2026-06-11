@@ -37,6 +37,10 @@ func (h *Handler) CreateCalendar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
 		return
 	}
+	if req.CalendarName == "" {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("calendar_name required"))
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"id":     uuid.New().String(),
 		"status": "Active",
@@ -55,6 +59,10 @@ func (h *Handler) CreateSweepRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
 		return
 	}
+	if req.Currency == "" || req.Rail == "" {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("currency and rail required"))
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":      uuid.New().String(),
 		"status":  "Active",
@@ -66,6 +74,11 @@ func (h *Handler) UpdateSweepRule(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if _, err := uuid.Parse(id); err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid rule id"))
+		return
+	}
+	var req map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "Updated"})
