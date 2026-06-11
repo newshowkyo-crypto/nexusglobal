@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T033`（Sweep service+scheduler）
-- **当前阶段**：P5 Treasury（T030-T032 完成，T033-T034 待做）
-- **上一轮做了什么**：T032 完成——queries.sql（InsertBankingCalendar/InsertSweepRule/InsertSweepTransfer/UpdateSweepTransferStatus/CountDailySweeps）；repository.go；scheduler.DelayQueue（Redis ZSET Enqueue/DequeueReady/Size/Clear）。
+- **下一个要做的任务**：`T034`（Treasury handler）
+- **当前阶段**：P5 Treasury（T030-T033 完成，T034 待做）
+- **上一轮做了什么**：T033 完成——service.Evaluate（校验窗口/受益人/阈值/次数→SUBMIT/ACCUMULATE/DELAYED/APPROVAL_REQUIRED 决策、DELAYED 入 Redis Delay Queue）；service.Submit（事务外调 bank.SubmitTransfer、超时→UnknownExternalState、失败→Failed）；service.Reconcile（幂等确认）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
