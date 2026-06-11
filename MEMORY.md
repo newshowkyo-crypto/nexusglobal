@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T002`（配置加载 platform/config）
-- **当前阶段**：P0 脚手架（T001 已完成）
-- **上一轮做了什么**：T001 项目骨架初始化完成（go.mod、目录结构、Makefile、docker-compose、.env.example、sqlc.yaml、空包占位）。Go 1.26.4 已安装。`make build` 和 `make test-short` 通过。
+- **下一个要做的任务**：`T003`（Postgres 连接池 + TxManager）
+- **当前阶段**：P0 脚手架（T001-T002 已完成）
+- **上一轮做了什么**：T002 Config 加载完成（caarlos0/env v11，必填项校验，测试通过）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
