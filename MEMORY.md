@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T025`（Streams MQ 封装）
-- **当前阶段**：P3 MAE 完成（T019-T024 全部完成），进入 P4 Webhook
-- **上一轮做了什么**：T024 完成——MAE handler（POST /admin/mae、PATCH /admin/mae/{mae_id}、POST rotate-secret、POST status、GET metrics、POST circuit-break、POST testing-evaluate + 测试）。
+- **下一个要做的任务**：`T026`（Webhook migration）
+- **当前阶段**：P4 Webhook（T025 完成，T026-T029 待做）
+- **上一轮做了什么**：T025 完成——stream.Producer（XADD 发布）、stream.Consumer（XReadGroup 消费组、EnsureGroup、processMessage、maxDeliveries→DLQ、ReclaimPending XAutoClaim 重投）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---

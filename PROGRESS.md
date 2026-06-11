@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T025**
-- 已完成：24 / 38
+- 当前进度指针：**T026**
+- 已完成：25 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T024 MAE handler 完成
+- 最近更新：T025 Streams MQ 完成
 
 ---
 
@@ -62,7 +62,7 @@
 ### P4 Webhook Receiver + Streams MQ
 | 任务 | 状态 | 依赖 | 完成时间 | 提交号 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| T025 stream MQ 封装 | ⬜ | T004 | | | |
+| T025 stream MQ 封装 | ✅ | T004 | 2026-06-12 | | |
 | T026 webhook migration | ⬜ | T003 | | | |
 | T027 webhook domain+repo (验签) | ⬜ | T026,T007,T006 | | | |
 | T028 webhook handler (只投MQ) | ⬜ | T027,T025 | | | 不连账务 |
