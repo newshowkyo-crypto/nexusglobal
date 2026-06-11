@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T027`（Webhook domain+repo 验签）
-- **当前阶段**：P4 Webhook（T025-T026 完成，T027-T029 待做）
-- **上一轮做了什么**：T026 完成——000002_init_webhook.up/down.sql（webhook_receiver_proxy UNIQUE(provider_type,provider_id)、webhook_ingress_event idempotency_key UNIQUE、raw_payload_ciphertext bytea）。
+- **下一个要做的任务**：`T028`（Webhook handler 只投 MQ）
+- **当前阶段**：P4 Webhook（T025-T027 完成，T028-T029 待做）
+- **上一轮做了什么**：T027 完成——domain（VerifyHMACSHA256、ComputeIdempotencyKey 两种规则、IngressStatus 枚举）；queries.sql（InsertIngressEvent、GetIngressEventByIdempotencyKey、UpdateIngressEventStatus、GetReceiverProxy）；repository.go；测试通过。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
