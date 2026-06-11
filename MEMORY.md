@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T003`（Postgres 连接池 + TxManager）
-- **当前阶段**：P0 脚手架（T001-T002 已完成）
-- **上一轮做了什么**：T002 Config 加载完成（caarlos0/env v11，必填项校验，测试通过）。
+- **下一个要做的任务**：`T004`（Redis 客户端 + Lua 封装）
+- **当前阶段**：P0 脚手架（T001-T003 已完成）
+- **上一轮做了什么**：T003 Postgres 连接池 + TxManager 完成（pgxpool、WithinTx、Commit/Rollback 测试、并发隔离测试通过）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
