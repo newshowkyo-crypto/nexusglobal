@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T001`（初始化项目骨架）
-- **当前阶段**：P0 脚手架（尚未开始编码）
-- **上一轮做了什么**：生成全套文档（TDD/CONSTRAINTS/API/CODING_STANDARDS/TASKS/AGENT_WORKFLOW/PROGRESS/MEMORY）。代码尚未开始。
+- **下一个要做的任务**：`T002`（配置加载 platform/config）
+- **当前阶段**：P0 脚手架（T001 已完成）
+- **上一轮做了什么**：T001 项目骨架初始化完成（go.mod、目录结构、Makefile、docker-compose、.env.example、sqlc.yaml、空包占位）。Go 1.26.4 已安装。`make build` 和 `make test-short` 通过。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
@@ -105,5 +105,5 @@
 
 ## 8. 完成状态
 
-- 项目状态：**文档已就绪，编码未开始**。
+- 项目状态：T001 完成，T002 待开始。
 - 完成标志：PROGRESS 中 T001–T037 全 ✅ 且 T038 收尾通过 → 在此写 `PROJECT COMPLETE` 并输出总结。
