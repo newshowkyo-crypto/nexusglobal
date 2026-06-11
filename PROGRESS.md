@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T024**
-- 已完成：23 / 38
+- 当前进度指针：**T025**
+- 已完成：24 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T023 MAE 熔断+Testing 完成
+- 最近更新：T024 MAE handler 完成
 
 ---
 
@@ -57,7 +57,7 @@
 | T021 mae metric (Redis) | ✅ | T004,T005 | 2026-06-12 | | exposure 只增 |
 | T022 mae repo+service | ✅ | T019,T020 | 2026-06-12 | | |
 | T023 mae 熔断+Testing | ✅ | T021,T022 | 2026-06-12 | | 当日锁 |
-| T024 mae handler | ⬜ | T022,T023 | | | |
+| T024 mae handler | ✅ | T022,T023 | 2026-06-12 | | |
 
 ### P4 Webhook Receiver + Streams MQ
 | 任务 | 状态 | 依赖 | 完成时间 | 提交号 | 备注 |
