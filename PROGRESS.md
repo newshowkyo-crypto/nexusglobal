@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T005**
-- 已完成：4 / 38
+- 当前进度指针：**T007**
+- 已完成：6 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：项目初始化（文档已生成，代码未开始）
+- 最近更新：T006 Clock/Logger/apperr/idempotency 完成
 
 ---
 
@@ -26,8 +26,8 @@
 | T002 config | ✅ | T001 | 2026-06-12 | 6c1589c | |
 | T003 postgres+TxManager | ✅ | T002 | 2026-06-12 | a9aaf1e | |
 | T004 redis | ✅ | T002 | 2026-06-12 | f1de7b6 | |
-| T005 money | ⬜ | T001 | | | |
-| T006 clock/logger/apperr/idempotency | ⬜ | T002 | | | |
+| T005 money | ✅ | T001 | 2026-06-12 | 03f74af | |
+| T006 clock/logger/apperr/idempotency | ✅ | T002 | 2026-06-12 | | |
 | T007 crypto+MockKMS | ⬜ | T002 | | | |
 | T008 external mock+validator | ⬜ | T001 | | | |
 
