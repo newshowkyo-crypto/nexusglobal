@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T022**
-- 已完成：21 / 38
+- 当前进度指针：**T023**
+- 已完成：22 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T021 MAE metric 完成
+- 最近更新：T022 MAE repo+service 完成
 
 ---
 
@@ -55,7 +55,7 @@
 | T019 mae migration | ✅ | T003 | 2026-06-12 | | |
 | T020 mae domain (状态机) | ✅ | T005 | 2026-06-12 | | 无 Cooldown→Active |
 | T021 mae metric (Redis) | ✅ | T004,T005 | 2026-06-12 | | exposure 只增 |
-| T022 mae repo+service | ⬜ | T019,T020 | | | |
+| T022 mae repo+service | ✅ | T019,T020 | 2026-06-12 | | |
 | T023 mae 熔断+Testing | ⬜ | T021,T022 | | | 当日锁 |
 | T024 mae handler | ⬜ | T022,T023 | | | |
 
