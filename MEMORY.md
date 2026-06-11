@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T019`（MAE migration）
-- **当前阶段**：P2 Payout 完成（T013-T018 全部完成），进入 P3 MAE
-- **上一轮做了什么**：T018 完成——payout.Worker（Phase3 Handle LP_PAYOUT_REQUESTED、事务外调 lp.Payout、submitted→LPProcessing、显式失败→Failed→释放、超时→UnknownExternalState frozen 不动）；Confirm（Phase4 幂等核销 frozen→Confirmed）；Release（Phase5 幂等释放 frozen→settled→BalanceReleased）。
+- **下一个要做的任务**：`T020`（MAE domain 状态机）
+- **当前阶段**：P3 MAE（T019 完成，T020-T024 待做）
+- **上一轮做了什么**：T019 完成——000001_init_mae.up/down.sql（mae_configuration 全字段、mae_id UNIQUE、status index、mae_runtime_metric_snapshot UNIQUE(mae_id,business_date,metric_key)）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---

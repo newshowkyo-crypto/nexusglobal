@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T019**
-- 已完成：18 / 38
+- 当前进度指针：**T020**
+- 已完成：19 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T018 LP Payout Worker 完成
+- 最近更新：T019 MAE migration 完成
 
 ---
 
@@ -52,7 +52,7 @@
 ### P3 MAE 状态机与路由
 | 任务 | 状态 | 依赖 | 完成时间 | 提交号 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| T019 mae migration | ⬜ | T003 | | | |
+| T019 mae migration | ✅ | T003 | 2026-06-12 | | |
 | T020 mae domain (状态机) | ⬜ | T005 | | | 无 Cooldown→Active |
 | T021 mae metric (Redis) | ⬜ | T004,T005 | | | exposure 只增 |
 | T022 mae repo+service | ⬜ | T019,T020 | | | |
