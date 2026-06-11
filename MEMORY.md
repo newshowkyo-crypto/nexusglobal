@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T015`（Payout repository）
-- **当前阶段**：P2 Payout（T013-T014 完成，T015-T018 待做）
-- **上一轮做了什么**：T014 完成——Payout 状态机（9 状态、CanTransition/Transition、Draft→BalanceFrozen→FxLocked→LPProcessing→Confirmed→Reconciled 主链 + Failed/UnknownExternalState 分支）；地址清洗 CleanAddress（trim/invisible removal/hash/mask + pkg/validator 校验）。
+- **下一个要做的任务**：`T016`（Payout service 冻结事务 + Outbox）
+- **当前阶段**：P2 Payout（T013-T015 完成，T016-T018 待做）
+- **上一轮做了什么**：T015 完成——queries.sql（LockBalanceForUpdate FOR UPDATE、UpdateBalance、InsertPayoutRequest、GetPayoutRequest、UpdatePayoutRequestStatus、InsertOutboxEvent、ClaimOutboxBatch SKIP LOCKED、AckOutboxEvent、FailOutboxEvent）；repository.go（Balance struct、LockBalanceForUpdate、UpdateBalance、InsertPayoutRequest、GetPayoutRequest、InsertOutboxEvent、ClaimOutboxBatch）；sqlc.yaml 更新支持多模块。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
