@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T017`（Outbox Worker + FX Lock Worker）
-- **当前阶段**：P2 Payout（T013-T016 完成，T017-T018 待做）
-- **上一轮做了什么**：T016 完成——service.Freeze 实现 TDD §5.3 Phase1（FOR UPDATE→校验 available→扣 settled/加 frozen→写 Outbox FX_LOCK_REQUESTED、事务内零外部 I/O、余额不足回滚不写 Outbox）；handler（CreateAddress、CreatePayoutRequest、Freeze 端点 + 测试）。
+- **下一个要做的任务**：`T018`（LP Payout Worker + Confirm/Release）
+- **当前阶段**：P2 Payout（T013-T017 完成，T018 待做）
+- **上一轮做了什么**：T017 完成——outbox.Worker（并发轮询、SKIP LOCKED 抢占、config 控制并发/批次/轮询间隔/最大重试）；fxlock.Worker（Handle FX_LOCK_REQUESTED、事务外调 lp.FXLock、成功→FxLocked+写 LP_PAYOUT_REQUESTED outbox、显式失败→Failed、超时→UnknownExternalState frozen 不动）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
