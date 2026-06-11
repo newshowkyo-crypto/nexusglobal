@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T037`（对账 worker）
-- **当前阶段**：P6 收尾（T035-T036 完成，T037-T038 待做）
-- **上一轮做了什么**：T036 完成——test/integration/integration_test.go（Payout 五阶段闭环、Webhook→Streams→Ledger 入账、Sweep 窗口+Delay Queue、并发双花验收 四个集成测试 stub，-short 跳过）。
+- **下一个要做的任务**：`T038`（文档校验+红线自查）
+- **当前阶段**：P6 收尾（T035-T037 完成，T038 待做——最后一个任务）
+- **上一轮做了什么**：T037 完成——reconcile.Worker（ReconcilePayout 查询 UnknownExternalState 的 payout 调 lp.QueryStatus→confirmed/failed 推进最终态、仍未知则保持不动）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
