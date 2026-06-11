@@ -33,6 +33,7 @@ import (
 	treasuryservice "github.com/nexusglobal/mamr/internal/treasury/service"
 	webhookhandler "github.com/nexusglobal/mamr/internal/webhook/handler"
 	webhookrepo "github.com/nexusglobal/mamr/internal/webhook/repository"
+	"github.com/nexusglobal/mamr/pkg/external/bank"
 )
 
 func main() {
@@ -96,7 +97,7 @@ func main() {
 	if rdb != nil {
 		delayQ = scheduler.NewDelayQueue(rdb, "SWEEP_DELAY")
 	}
-	treasurySvc := treasuryservice.New(treasuryRepoInst, nil, txm, pool, delayQ, log)
+	treasurySvc := treasuryservice.New(treasuryRepoInst, bank.NewMockBank(), txm, pool, delayQ, log)
 	treasuryH := treasuryhandler.New(treasurySvc)
 
 	outboxH := payouthandler.NewOutboxHandler(pool)

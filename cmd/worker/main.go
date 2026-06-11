@@ -6,13 +6,19 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
+	payoutrepo "github.com/nexusglobal/mamr/internal/payout/repository"
 	"github.com/nexusglobal/mamr/internal/platform/config"
 	"github.com/nexusglobal/mamr/internal/platform/logger"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
 	"github.com/nexusglobal/mamr/internal/webhook/consumer"
+	"github.com/nexusglobal/mamr/internal/worker/fxlock"
+	"github.com/nexusglobal/mamr/internal/worker/outbox"
+	payoutworker "github.com/nexusglobal/mamr/internal/worker/payout"
+	"github.com/nexusglobal/mamr/pkg/external/lp"
 )
 
 func main() {
@@ -40,6 +46,35 @@ func main() {
 
 	log.Info("worker starting", "concurrency", cfg.OutboxWorkerConcurrency)
 
+	txm := postgres.NewTxManager(pool)
+	repo := payoutrepo.New(pool)
+	lpCli := lp.NewMockLP()
+
+	fxlockWorker := fxlock.New(repo, lpCli, txm, pool, log)
+	payoutWorker := payoutworker.New(repo, lpCli, txm, pool, log)
+
+	outboxProcessor := func(ctx context.Context, event outbox.OutboxEvent) error {
+		switch event.EventType {
+		case "FX_LOCK_REQUESTED":
+			return fxlockWorker.Handle(ctx, event)
+		case "LP_PAYOUT_REQUESTED":
+			return payoutWorker.Handle(ctx, event)
+		default:
+			log.Warn("unknown outbox event type", "type", event.EventType, "id", event.ID)
+			return nil
+		}
+	}
+
+	outboxCfg := outbox.Config{
+		Concurrency:  cfg.OutboxWorkerConcurrency,
+		BatchSize:    int32(cfg.OutboxClaimBatch),
+		PollInterval: cfg.SweepTickInterval,
+		MaxRetries:   cfg.StreamMaxDeliveries,
+	}
+	outboxWorker := outbox.New(repo, outboxProcessor, outboxCfg, log)
+	outboxWorker.Start(ctx)
+	log.Info("outbox worker started", "concurrency", cfg.OutboxWorkerConcurrency)
+
 	if rdb != nil {
 		lpConsumer := consumer.New(rdb, nil, log)
 		go func() {
@@ -50,7 +85,18 @@ func main() {
 		log.Info("lp webhook consumer started")
 	}
 
-	log.Info("outbox worker would start here (requires service wiring)")
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				log.Info("reconcile tick (placeholder)")
+			}
+		}
+	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -58,6 +104,7 @@ func main() {
 
 	log.Info("shutting down worker...")
 	cancel()
+	outboxWorker.Stop()
 	if pool != nil {
 		pool.Close()
 	}

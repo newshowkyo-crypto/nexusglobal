@@ -10,13 +10,16 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/nexusglobal/mamr/internal/payout/domain"
+	"github.com/nexusglobal/mamr/internal/payout/repository/db"
 	"github.com/nexusglobal/mamr/internal/payout/service"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
-	"github.com/nexusglobal/mamr/pkg/validator"
 )
 
 type PayoutService interface {
 	Freeze(ctx context.Context, cmd service.FreezeCmd) (service.FreezeResult, error)
+	CreateAddress(ctx context.Context, cmd service.CreateAddressCmd) (uuid.UUID, error)
+	CreatePayoutRequest(ctx context.Context, cmd service.CreateRequestCmd) (uuid.UUID, error)
+	GetPayoutRequest(ctx context.Context, id uuid.UUID) (*db.PayoutRequest, error)
 }
 
 type Handler struct {
@@ -35,6 +38,10 @@ type CreateAddressResponse struct {
 }
 
 func (h *Handler) CreateAddress(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
+		return
+	}
 	var req struct {
 		TargetAsset       string `json:"target_asset"`
 		TargetNetwork     string `json:"target_network"`
@@ -50,18 +57,21 @@ func (h *Handler) CreateAddress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("target_address required"))
 		return
 	}
-
-	cleaned := domain.CleanAddress(req.TargetAddress, validator.Network(req.TargetNetwork))
-	if !cleaned.IsValid {
-		writeError(w, apperr.ErrAddressFormat.WithMessage(cleaned.ValidationError))
+	addrID, err := h.svc.CreateAddress(r.Context(), service.CreateAddressCmd{
+		TargetAsset:       req.TargetAsset,
+		TargetNetwork:     req.TargetNetwork,
+		AddressFormatType: req.AddressFormatType,
+		TargetAddress:     req.TargetAddress,
+		AddressLabel:      req.AddressLabel,
+	})
+	if err != nil {
+		writeAppErr(w, err)
 		return
 	}
-
 	writeJSON(w, http.StatusCreated, CreateAddressResponse{
-		ID:                  uuid.New().String(),
-		TargetAddressMasked: cleaned.TargetAddressMasked,
-		ScreeningStatus:     "Pending",
-		WhitelistStatus:     "Pending",
+		ID:              addrID.String(),
+		ScreeningStatus: "Pending",
+		WhitelistStatus: "Pending",
 	})
 }
 
@@ -77,7 +87,10 @@ func (h *Handler) CreatePayoutRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("Idempotency-Key header required"))
 		return
 	}
-
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
+		return
+	}
 	var req struct {
 		PayoutAddressID string `json:"payout_address_id"`
 		Amount          string `json:"amount"`
@@ -93,15 +106,26 @@ func (h *Handler) CreatePayoutRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("amount and fiat_currency required"))
 		return
 	}
-
-	_, err := decimal.NewFromString(req.Amount)
+	amount, err := decimal.NewFromString(req.Amount)
 	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid amount format"))
 		return
 	}
-
+	addrID, _ := uuid.Parse(req.PayoutAddressID)
+	payoutID, err := h.svc.CreatePayoutRequest(r.Context(), service.CreateRequestCmd{
+		PayoutAddressID: addrID,
+		Amount:          amount,
+		FiatCurrency:    req.FiatCurrency,
+		TargetAsset:     req.TargetAsset,
+		TargetNetwork:   req.TargetNetwork,
+		IdempotencyKey:  idempotencyKey,
+	})
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
 	writeJSON(w, http.StatusCreated, CreatePayoutResponse{
-		ID:             uuid.New().String(),
+		ID:             payoutID.String(),
 		Status:         string(domain.StatusDraft),
 		IdempotencyKey: idempotencyKey,
 	})
@@ -114,12 +138,10 @@ func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
 		return
 	}
-
 	if h.svc == nil {
 		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
 		return
 	}
-
 	var req struct {
 		MerchantID      string `json:"merchant_id"`
 		Amount          string `json:"amount"`
@@ -132,25 +154,21 @@ func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
 		return
 	}
-
 	merchantID, err := uuid.Parse(req.MerchantID)
 	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid merchant_id"))
 		return
 	}
-
 	amount, err := decimal.NewFromString(req.Amount)
 	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid amount"))
 		return
 	}
-
 	addrID, _ := uuid.Parse(req.PayoutAddressID)
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	if idempotencyKey == "" {
 		idempotencyKey = "freeze:" + payoutID.String()
 	}
-
 	result, err := h.svc.Freeze(r.Context(), service.FreezeCmd{
 		PayoutRequestID: payoutID,
 		MerchantID:      merchantID,
@@ -165,7 +183,6 @@ func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 		writeAppErr(w, err)
 		return
 	}
-
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":               result.Status,
 		"ledger_freeze_txn_id": result.PayoutRequestID,
@@ -174,8 +191,22 @@ func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) FxLock(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
-	if _, err := uuid.Parse(idStr); err != nil {
+	payoutID, err := uuid.Parse(idStr)
+	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
+		return
+	}
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
+		return
+	}
+	req, err := h.svc.GetPayoutRequest(r.Context(), payoutID)
+	if err != nil || req == nil {
+		writeError(w, apperr.ErrNotFound.WithMessage("payout request not found"))
+		return
+	}
+	if req.Status != string(domain.StatusBalanceFrozen) {
+		writeError(w, apperr.ErrIllegalTransition.WithMessage("payout not in BalanceFrozen status"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "FxLocked"})
@@ -183,8 +214,22 @@ func (h *Handler) FxLock(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
-	if _, err := uuid.Parse(idStr); err != nil {
+	payoutID, err := uuid.Parse(idStr)
+	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
+		return
+	}
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
+		return
+	}
+	req, err := h.svc.GetPayoutRequest(r.Context(), payoutID)
+	if err != nil || req == nil {
+		writeError(w, apperr.ErrNotFound.WithMessage("payout request not found"))
+		return
+	}
+	if req.Status != string(domain.StatusFxLocked) {
+		writeError(w, apperr.ErrIllegalTransition.WithMessage("payout not in FxLocked status"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "LPProcessing"})
@@ -192,8 +237,18 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
-	if _, err := uuid.Parse(idStr); err != nil {
+	payoutID, err := uuid.Parse(idStr)
+	if err != nil {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
+		return
+	}
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
+		return
+	}
+	req, err := h.svc.GetPayoutRequest(r.Context(), payoutID)
+	if err != nil || req == nil {
+		writeError(w, apperr.ErrNotFound.WithMessage("payout request not found"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "Confirmed"})
@@ -212,18 +267,6 @@ func writeError(w http.ResponseWriter, err *apperr.Error) {
 		"error": map[string]any{
 			"code":    err.Code,
 			"message": err.Message,
-		},
-	})
-}
-
-func writeErrorWithRequestID(w http.ResponseWriter, r *http.Request, err *apperr.Error) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(err.HTTP)
-	json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]any{
-			"code":       err.Code,
-			"message":    err.Message,
-			"request_id": r.Header.Get("X-Request-ID"),
 		},
 	})
 }

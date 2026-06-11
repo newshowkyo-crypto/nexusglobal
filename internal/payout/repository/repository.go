@@ -11,6 +11,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	ledgerdomain "github.com/nexusglobal/mamr/internal/ledger/domain"
+	ledgerdb "github.com/nexusglobal/mamr/internal/ledger/repository/db"
 	"github.com/nexusglobal/mamr/internal/payout/repository/db"
 )
 
@@ -173,15 +174,41 @@ func NewLedgerRepo(pool *pgxpool.Pool) *LedgerRepo {
 }
 
 func (r *LedgerRepo) PostTransaction(ctx context.Context, tx pgx.Tx, txn ledgerdomain.Transaction) (*ledgerdomain.Transaction, error) {
-	entries := make([]ledgerdomain.Entry, len(txn.Entries))
-	copy(entries, txn.Entries)
-	return &ledgerdomain.Transaction{
-		ID:              txn.IdempotencyKey,
+	q := ledgerdb.New(r.pool).WithTx(tx)
+
+	aggUUID, _ := uuid.Parse(txn.AggregateID)
+	insertTxn, err := q.InsertLedgerTransaction(ctx, ledgerdb.InsertLedgerTransactionParams{
 		IdempotencyKey:  txn.IdempotencyKey,
-		TransactionType: txn.TransactionType,
+		TransactionType: string(txn.TransactionType),
 		AggregateType:   txn.AggregateType,
-		AggregateID:     txn.AggregateID,
+		AggregateID:     pgtype.UUID{Bytes: aggUUID, Valid: true},
 		Description:     txn.Description,
-		Entries:         entries,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range txn.Entries {
+		accUUID, _ := uuid.Parse(entry.AccountID)
+		num := decimalToNumeric(entry.Amount)
+		_, err := q.InsertLedgerEntry(ctx, ledgerdb.InsertLedgerEntryParams{
+			TransactionID: insertTxn.ID,
+			AccountID:     accUUID,
+			Direction:     string(entry.Direction),
+			Amount:        num,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &ledgerdomain.Transaction{
+		ID:              insertTxn.ID.String(),
+		IdempotencyKey:  insertTxn.IdempotencyKey,
+		TransactionType: ledgerdomain.TransactionType(insertTxn.TransactionType),
+		AggregateType:   insertTxn.AggregateType,
+		AggregateID:     txn.AggregateID,
+		Description:     insertTxn.Description,
+		Entries:         txn.Entries,
 	}, nil
 }

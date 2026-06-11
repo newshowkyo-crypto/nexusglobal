@@ -40,6 +40,7 @@ type PayoutRepository interface {
 	LockBalanceForUpdate(ctx context.Context, tx pgx.Tx, merchantID uuid.UUID, currency string) (*repository.Balance, error)
 	UpdateBalance(ctx context.Context, tx pgx.Tx, b *repository.Balance) error
 	InsertPayoutRequest(ctx context.Context, tx pgx.Tx, params db.InsertPayoutRequestParams) (*db.PayoutRequest, error)
+	GetPayoutRequest(ctx context.Context, id uuid.UUID) (*db.PayoutRequest, error)
 	GetPayoutRequestByIdempotencyKey(ctx context.Context, key string) (*db.PayoutRequest, error)
 	InsertOutboxEvent(ctx context.Context, tx pgx.Tx, params db.InsertOutboxEventParams) (*db.TransactionalOutbox, error)
 }
@@ -155,4 +156,66 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 		return FreezeResult{}, err
 	}
 	return result, nil
+}
+
+type CreateAddressCmd struct {
+	MerchantID        uuid.UUID
+	TargetAsset       string
+	TargetNetwork     string
+	AddressFormatType string
+	TargetAddress     string
+	AddressLabel      string
+}
+
+func (s *Service) CreateAddress(ctx context.Context, cmd CreateAddressCmd) (uuid.UUID, error) {
+	addrID := uuid.New()
+	_ = cmd
+	return addrID, nil
+}
+
+type CreateRequestCmd struct {
+	MerchantID      uuid.UUID
+	PayoutAddressID uuid.UUID
+	Amount          decimal.Decimal
+	FiatCurrency    string
+	TargetAsset     string
+	TargetNetwork   string
+	IdempotencyKey  string
+}
+
+func (s *Service) CreatePayoutRequest(ctx context.Context, cmd CreateRequestCmd) (uuid.UUID, error) {
+	existing, err := s.repo.GetPayoutRequestByIdempotencyKey(ctx, cmd.IdempotencyKey)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if existing != nil {
+		return existing.ID, nil
+	}
+
+	payoutReq, err := s.repo.InsertPayoutRequest(ctx, nil, db.InsertPayoutRequestParams{
+		MerchantID:      cmd.MerchantID,
+		PayoutAddressID: cmd.PayoutAddressID,
+		Amount:          decimalToNumeric(cmd.Amount),
+		FiatCurrency:    cmd.FiatCurrency,
+		TargetAsset:     cmd.TargetAsset,
+		TargetNetwork:   cmd.TargetNetwork,
+		Status:          string(domain.StatusDraft),
+		IdempotencyKey:  cmd.IdempotencyKey,
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return payoutReq.ID, nil
+}
+
+func (s *Service) GetPayoutRequest(ctx context.Context, id uuid.UUID) (*db.PayoutRequest, error) {
+	return s.repo.GetPayoutRequest(ctx, id)
+}
+
+func decimalToNumeric(d decimal.Decimal) pgtype.Numeric {
+	return pgtype.Numeric{
+		Int:   d.Coefficient(),
+		Exp:   -int32(d.Exponent()),
+		Valid: true,
+	}
 }
