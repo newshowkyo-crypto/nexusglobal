@@ -9,11 +9,11 @@
 
 ## 快照
 
-- 当前进度指针：**T018**
-- 已完成：17 / 38
+- 当前进度指针：**T019**
+- 已完成：18 / 38
 - 进行中：无
 - 受阻：无
-- 最近更新：T017 Outbox+FXLock worker 完成
+- 最近更新：T018 LP Payout Worker 完成
 
 ---
 
@@ -47,7 +47,7 @@
 | T015 payout repository | ✅ | T013,T014 | 2026-06-12 | | |
 | T016 payout freeze service (Phase1) | ✅ | T015,T012 | 2026-06-12 | | 并发双花测试 |
 | T017 outbox+fxlock worker (Phase2) | ✅ | T016,T008,T004 | 2026-06-12 | | |
-| T018 lp payout worker (Phase3/4/5) | ⬜ | T017 | | | 五阶段闭环 |
+| T018 lp payout worker (Phase3/4/5) | ✅ | T017 | 2026-06-12 | | 五阶段闭环 |
 
 ### P3 MAE 状态机与路由
 | 任务 | 状态 | 依赖 | 完成时间 | 提交号 | 备注 |

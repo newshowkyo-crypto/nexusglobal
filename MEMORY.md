@@ -9,9 +9,9 @@
 
 ## 0. 进度指针（最重要，先看这里）
 
-- **下一个要做的任务**：`T018`（LP Payout Worker + Confirm/Release）
-- **当前阶段**：P2 Payout（T013-T017 完成，T018 待做）
-- **上一轮做了什么**：T017 完成——outbox.Worker（并发轮询、SKIP LOCKED 抢占、config 控制并发/批次/轮询间隔/最大重试）；fxlock.Worker（Handle FX_LOCK_REQUESTED、事务外调 lp.FXLock、成功→FxLocked+写 LP_PAYOUT_REQUESTED outbox、显式失败→Failed、超时→UnknownExternalState frozen 不动）。
+- **下一个要做的任务**：`T019`（MAE migration）
+- **当前阶段**：P2 Payout 完成（T013-T018 全部完成），进入 P3 MAE
+- **上一轮做了什么**：T018 完成——payout.Worker（Phase3 Handle LP_PAYOUT_REQUESTED、事务外调 lp.Payout、submitted→LPProcessing、显式失败→Failed→释放、超时→UnknownExternalState frozen 不动）；Confirm（Phase4 幂等核销 frozen→Confirmed）；Release（Phase5 幂等释放 frozen→settled→BalanceReleased）。
 - **恢复方式**：读本节 → 读 PROGRESS 看板 → 按 AGENT_WORKFLOW STEP 1 选最低编号「待办且依赖已完成」任务。
 
 ---
