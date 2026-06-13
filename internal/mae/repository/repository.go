@@ -3,9 +3,11 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/nexusglobal/mamr/internal/mae/repository/db"
@@ -57,13 +59,18 @@ func (r *Repository) ListConfigs(ctx context.Context) ([]db.MaeConfiguration, er
 	return q.ListMAEConfigs(ctx)
 }
 
-func (r *Repository) UpdateStatus(ctx context.Context, id uuid.UUID, status, reason string, version int32) error {
+func (r *Repository) UpdateStatus(ctx context.Context, id uuid.UUID, status, reason string, version int32, lockUntil *time.Time) error {
 	q := db.New(r.pool)
+	var lockDate pgtype.Date
+	if lockUntil != nil {
+		lockDate = pgtype.Date{Time: *lockUntil, Valid: true}
+	}
 	return q.UpdateMAEStatus(ctx, db.UpdateMAEStatusParams{
-		ID:           id,
-		Status:       status,
-		StatusReason: reason,
-		Version:      version,
+		ID:                   id,
+		Status:               status,
+		StatusReason:         reason,
+		BusinessDayLockUntil: lockDate,
+		Version:              version,
 	})
 }
 

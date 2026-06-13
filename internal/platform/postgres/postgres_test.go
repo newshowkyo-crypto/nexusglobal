@@ -34,18 +34,29 @@ func setupTestDB(t *testing.T) (*TxManager, func()) {
 		ContainerRequest: req,
 		Started:          true,
 	})
-	require.NoError(t, err)
+	if err != nil {
+		t.Skipf("skipping: cannot start container: %v", err)
+	}
 
 	host, err := container.Host(ctx)
-	require.NoError(t, err)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		t.Skipf("skipping: cannot get host: %v", err)
+	}
 
 	mappedPort, err := container.MappedPort(ctx, "5432")
-	require.NoError(t, err)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		t.Skipf("skipping: cannot get port: %v", err)
+	}
 
 	dsn := "postgres://test:test@" + host + ":" + mappedPort.Port() + "/test?sslmode=disable"
 
 	pool, err := NewPool(ctx, dsn)
-	require.NoError(t, err)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		t.Skipf("skipping: cannot connect to postgres: %v", err)
+	}
 
 	tm := NewTxManager(pool)
 

@@ -57,6 +57,7 @@ type Consumer struct {
 	handler       func(ctx context.Context, msg redis.XMessage) error
 	logger        *slog.Logger
 	dlqStream     string
+	minIdle       time.Duration
 }
 
 type ConsumerConfig struct {
@@ -68,9 +69,14 @@ type ConsumerConfig struct {
 	Handler       func(ctx context.Context, msg redis.XMessage) error
 	Logger        *slog.Logger
 	DLQStream     string
+	MinIdle       *time.Duration
 }
 
 func NewConsumer(cfg ConsumerConfig) *Consumer {
+	minIdle := 30 * time.Second
+	if cfg.MinIdle != nil {
+		minIdle = *cfg.MinIdle
+	}
 	return &Consumer{
 		rdb:           cfg.RDB,
 		stream:        cfg.Stream,
@@ -80,6 +86,7 @@ func NewConsumer(cfg ConsumerConfig) *Consumer {
 		handler:       cfg.Handler,
 		logger:        cfg.Logger,
 		dlqStream:     cfg.DLQStream,
+		minIdle:       minIdle,
 	}
 }
 
@@ -124,31 +131,14 @@ func (c *Consumer) Start(ctx context.Context) {
 }
 
 func (c *Consumer) processMessage(ctx context.Context, msg redis.XMessage) {
-	deliveries := c.getDeliveryCount(msg)
-
-	if deliveries >= c.maxDeliveries {
-		c.logger.Warn("max deliveries reached, sending to DLQ",
-			"msg_id", msg.ID, "deliveries", deliveries)
-		c.sendToDLQ(ctx, msg)
-		c.rdb.XAck(ctx, c.stream, c.group, msg.ID)
-		return
-	}
-
 	if err := c.handler(ctx, msg); err != nil {
-		c.logger.Error("handler failed", "msg_id", msg.ID, "err", err)
+		c.logger.Error("handler failed, leaving in PEL for retry",
+			"msg_id", msg.ID, "err", err)
+		// 不 XAck，让消息留在 PEL，由 ReclaimPending 回收重试
 		return
 	}
 
 	c.rdb.XAck(ctx, c.stream, c.group, msg.ID)
-}
-
-func (c *Consumer) getDeliveryCount(msg redis.XMessage) int {
-	if v, ok := msg.Values["delivery_count"]; ok {
-		if n, ok := v.(int64); ok {
-			return int(n)
-		}
-	}
-	return 1
 }
 
 func (c *Consumer) sendToDLQ(ctx context.Context, msg redis.XMessage) {
@@ -169,21 +159,66 @@ func (c *Consumer) sendToDLQ(ctx context.Context, msg redis.XMessage) {
 }
 
 func (c *Consumer) ReclaimPending(ctx context.Context) (int64, error) {
-	msgs, _, err := c.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-		Stream:   c.stream,
-		Group:    c.group,
-		MinIdle:  30 * time.Second,
-		Start:    "0-0",
-		Count:    16,
-		Consumer: c.consumerID,
-	}).Result()
-	if err != nil {
-		return 0, err
+	var totalReclaimed int64
+	start := "0-0"
+
+	for {
+		msgs, newStart, err := c.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   c.stream,
+			Group:    c.group,
+			MinIdle:  c.minIdle,
+			Start:    start,
+			Count:    16,
+			Consumer: c.consumerID,
+		}).Result()
+		if err != nil {
+			return totalReclaimed, err
+		}
+
+		if len(msgs) == 0 {
+			break
+		}
+
+		// 获取这些消息的 delivery count（不限 consumer）
+		pendingExt, err := c.rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+			Stream: c.stream,
+			Group:  c.group,
+			Start:  msgs[0].ID,
+			End:    msgs[len(msgs)-1].ID,
+			Count:  int64(len(msgs)),
+		}).Result()
+		if err != nil {
+			return totalReclaimed, err
+		}
+
+		// 构建 message ID -> delivery count 的映射
+		deliveryCounts := make(map[string]int64)
+		for _, pe := range pendingExt {
+			deliveryCounts[pe.ID] = pe.RetryCount
+		}
+
+		for _, msg := range msgs {
+			retryCount := deliveryCounts[msg.ID]
+			if retryCount == 0 {
+				retryCount = 1 // 至少 1 次
+			}
+
+			if int(retryCount) >= c.maxDeliveries {
+				c.logger.Warn("max deliveries reached, sending to DLQ",
+					"msg_id", msg.ID, "retry_count", retryCount)
+				c.sendToDLQ(ctx, msg)
+				c.rdb.XAck(ctx, c.stream, c.group, msg.ID)
+			} else {
+				c.processMessage(ctx, msg)
+			}
+			totalReclaimed++
+		}
+
+		start = newStart
+		if start == "0-0" {
+			break
+		}
 	}
 
-	for _, msg := range msgs {
-		c.processMessage(ctx, msg)
-	}
-
-	return int64(len(msgs)), nil
+	return totalReclaimed, nil
 }

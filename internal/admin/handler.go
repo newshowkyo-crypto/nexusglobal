@@ -9,15 +9,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/nexusglobal/mamr/internal/payout/domain"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
+	"github.com/nexusglobal/mamr/internal/platform/crypto"
+	"github.com/nexusglobal/mamr/pkg/validator"
 )
 
 type Handler struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	encryptor *crypto.Encryptor
 }
 
-func NewHandler(pool *pgxpool.Pool) *Handler {
-	return &Handler{pool: pool}
+func NewHandler(pool *pgxpool.Pool, encryptor *crypto.Encryptor) *Handler {
+	return &Handler{pool: pool, encryptor: encryptor}
 }
 
 // ── Stats ──
@@ -546,4 +550,335 @@ func queryInt(r *http.Request, key string, def int) int {
 		return def
 	}
 	return n
+}
+
+// ── R3-3: 数据录入端点 ──
+
+// CreateBankCalendar 创建银行日历
+func (h *Handler) CreateBankCalendar(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CalendarName string `json:"calendar_name"`
+		Jurisdiction string `json:"jurisdiction"`
+		Timezone     string `json:"timezone"`
+		BusinessDays string `json:"business_days"`
+		Holidays     string `json:"holidays"`
+		CutOffMatrix string `json:"cut_off_matrix"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	ctx := r.Context()
+	var id uuid.UUID
+	err := h.pool.QueryRow(ctx,
+		`INSERT INTO banking_calendar (calendar_name, jurisdiction, timezone, business_days, holidays, cut_off_matrix, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'Active') RETURNING id`,
+		req.CalendarName, req.Jurisdiction, req.Timezone,
+		[]byte(req.BusinessDays), []byte(req.Holidays), []byte(req.CutOffMatrix),
+	).Scan(&id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "created"})
+}
+
+// CreateMAEConfig 创建 MAE 配置
+func (h *Handler) CreateMAEConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MAEID                   string   `json:"mae_id"`
+		DisplayName             string   `json:"display_name"`
+		MAEType                 string   `json:"mae_type"`
+		TenantScope             []string `json:"tenant_scope"`
+		Jurisdiction            string   `json:"jurisdiction"`
+		SupportedCurrencies     []string `json:"supported_currencies"`
+		APIBaseURL              string   `json:"api_base_url"`
+		SettlementBankAccountID string   `json:"settlement_bank_account_id"`
+		APIKey                  string   `json:"api_key"`
+		WebhookSecret           string   `json:"webhook_secret"`
+		DailyVmaxMinor          int64    `json:"daily_vmax_minor"`
+		MonthlyVmaxMinor        int64    `json:"monthly_vmax_minor"`
+		RoutingWeight           int32    `json:"routing_weight"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	settlementBankID, err := uuid.Parse(req.SettlementBankAccountID)
+	if err != nil {
+		writeErr(w, apperr.ErrInvalidArgument.WithMessage("invalid settlement_bank_account_id"))
+		return
+	}
+
+	ctx := r.Context()
+
+	// R3-3 复修：敏感字段必须经 Encryptor 加密后再落库（之前「简化处理」直接存明文是安全基线倒退）。
+	// 缺 encryptor 时 fail-closed：拒绝写入而非退化为明文。
+	if h.encryptor == nil {
+		writeErr(w, apperr.ErrInternal.WithMessage("encryptor not configured; refusing to store API key in plaintext"))
+		return
+	}
+	apiKeyEnc, err := h.encryptor.Encrypt(ctx, []byte(req.APIKey), crypto.Meta{
+		TenantID: req.MAEID, RecordID: "mae_configuration", FieldName: "api_key",
+	})
+	if err != nil {
+		writeErr(w, apperr.ErrInternal.WithMessage("encrypt api_key: "+err.Error()))
+		return
+	}
+	webhookSecretEnc, err := h.encryptor.Encrypt(ctx, []byte(req.WebhookSecret), crypto.Meta{
+		TenantID: req.MAEID, RecordID: "mae_configuration", FieldName: "webhook_secret",
+	})
+	if err != nil {
+		writeErr(w, apperr.ErrInternal.WithMessage("encrypt webhook_secret: "+err.Error()))
+		return
+	}
+
+	tenantScopeJSON, _ := json.Marshal(req.TenantScope)
+	currenciesJSON, _ := json.Marshal(req.SupportedCurrencies)
+
+	var id uuid.UUID
+	err = h.pool.QueryRow(ctx,
+		`INSERT INTO mae_configuration (
+			mae_id, display_name, mae_type, tenant_scope, jurisdiction,
+			supported_currencies, api_base_url, settlement_bank_account_id,
+			api_key_ciphertext, webhook_secret_ciphertext, daily_vmax_minor,
+			monthly_vmax_minor, routing_weight, status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'Draft') RETURNING id`,
+		req.MAEID, req.DisplayName, req.MAEType, tenantScopeJSON, req.Jurisdiction,
+		currenciesJSON, req.APIBaseURL, settlementBankID,
+		apiKeyEnc, webhookSecretEnc, req.DailyVmaxMinor,
+		req.MonthlyVmaxMinor, req.RoutingWeight,
+	).Scan(&id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "created"})
+}
+
+// CreateSweepRule 创建归集规则
+func (h *Handler) CreateSweepRule(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SourceBankAccountID string `json:"source_bank_account_id"`
+		TargetBankAccountID string `json:"target_bank_account_id"`
+		Currency            string `json:"currency"`
+		Rail                string `json:"rail"`
+		BeneficiaryType     string `json:"beneficiary_type"`
+		TriggerThreshold    int64  `json:"trigger_threshold_minor"`
+		SweepRatioBps       int32  `json:"sweep_ratio_bps"`
+		MaxSingleSweep      int64  `json:"max_single_sweep_minor"`
+		MinResidual         int64  `json:"min_residual_minor"`
+		MaxDailySweepCount  int32  `json:"max_daily_sweep_count"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	ctx := r.Context()
+	sourceID, _ := uuid.Parse(req.SourceBankAccountID)
+	targetID, _ := uuid.Parse(req.TargetBankAccountID)
+
+	var id uuid.UUID
+	err := h.pool.QueryRow(ctx,
+		`INSERT INTO sweep_rule (
+			source_bank_account_id, target_bank_account_id, currency, rail,
+			beneficiary_type, trigger_threshold_minor, sweep_ratio_bps,
+			max_single_sweep_minor, min_residual_minor, max_daily_sweep_count, status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Active') RETURNING id`,
+		sourceID, targetID, req.Currency, req.Rail,
+		req.BeneficiaryType, req.TriggerThreshold, req.SweepRatioBps,
+		req.MaxSingleSweep, req.MinResidual, req.MaxDailySweepCount,
+	).Scan(&id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "created"})
+}
+
+// CreateWebhookProxy 创建 Webhook 代理
+func (h *Handler) CreateWebhookProxy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProviderType  string   `json:"provider_type"`
+		ProviderID    string   `json:"provider_id"`
+		WebhookURL    string   `json:"webhook_url"`
+		SignatureAlgo string   `json:"signature_algo"`
+		Secret        string   `json:"secret"`
+		IPAllowlist   []string `json:"ip_allowlist"`
+		RateLimit     int32    `json:"rate_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	ctx := r.Context()
+
+	// R3-3 复修：webhook secret 必须经 Encryptor 加密后存 secret_ciphertext（与 webhook handler
+	// 验签前的 Decrypt 配对），缺 encryptor 时 fail-closed 拒写。
+	if h.encryptor == nil {
+		writeErr(w, apperr.ErrInternal.WithMessage("encryptor not configured; refusing to store webhook secret in plaintext"))
+		return
+	}
+	secretEnc, err := h.encryptor.Encrypt(ctx, []byte(req.Secret), crypto.Meta{
+		TenantID: req.ProviderID, RecordID: "webhook_receiver_proxy", FieldName: "secret",
+	})
+	if err != nil {
+		writeErr(w, apperr.ErrInternal.WithMessage("encrypt secret: "+err.Error()))
+		return
+	}
+
+	// ip_allowlist 列是 jsonb：序列化为 JSON 数组（空数组 = "[]" 满足 NOT NULL DEFAULT '[]'）。
+	ipAllowlistJSON, _ := json.Marshal(req.IPAllowlist)
+
+	var id uuid.UUID
+	err = h.pool.QueryRow(ctx,
+		`INSERT INTO webhook_receiver_proxy (
+			provider_type, provider_id, webhook_url, signature_algo,
+			secret_ciphertext, ip_allowlist, rate_limit, status
+		) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'Active') RETURNING id`,
+		req.ProviderType, req.ProviderID, req.WebhookURL, req.SignatureAlgo,
+		secretEnc, string(ipAllowlistJSON), req.RateLimit,
+	).Scan(&id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "created"})
+}
+
+// CreateMerchant 创建商户（在 treasury ledger 中注册）
+func (h *Handler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MerchantID string `json:"merchant_id"`
+		Currency   string `json:"currency"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	ctx := r.Context()
+	merchantID, _ := uuid.Parse(req.MerchantID)
+
+	_, err := h.pool.Exec(ctx,
+		`INSERT INTO merchant_treasury_ledger (merchant_id, currency)
+		 VALUES ($1, $2) ON CONFLICT (merchant_id, currency) DO NOTHING`,
+		merchantID, req.Currency)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{"merchant_id": req.MerchantID, "status": "created"})
+}
+
+// CreateBankAccount 创建银行账户（表 bank_account_balance，第 7 张 B 类表）。
+// bank_account_id 是银行账户的稳定标识（由业务侧分配）；accumulated_minor 为该 (bank_account, currency)
+// 起始余额，单位为最小币种单位（minor），用 int64 不走 decimal（与 schema bigint 一致）。
+func (h *Handler) CreateBankAccount(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BankAccountID    string `json:"bank_account_id"`
+		Currency         string `json:"currency"`
+		AccumulatedMinor int64  `json:"accumulated_minor"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	bankAccountID, err := uuid.Parse(req.BankAccountID)
+	if err != nil {
+		writeErr(w, apperr.ErrInvalidArgument.WithMessage("invalid bank_account_id"))
+		return
+	}
+	if req.Currency == "" {
+		writeErr(w, apperr.ErrInvalidArgument.WithMessage("currency required"))
+		return
+	}
+	if req.AccumulatedMinor < 0 {
+		writeErr(w, apperr.ErrInvalidArgument.WithMessage("accumulated_minor must be >= 0"))
+		return
+	}
+
+	ctx := r.Context()
+	// UPSERT：若 (bank_account_id, currency) 已存在则覆盖余额（数据修正/对账场景），保持幂等。
+	_, err = h.pool.Exec(ctx,
+		`INSERT INTO bank_account_balance (bank_account_id, currency, accumulated_minor, updated_at)
+		 VALUES ($1, $2, $3, now())
+		 ON CONFLICT (bank_account_id, currency)
+		 DO UPDATE SET accumulated_minor = EXCLUDED.accumulated_minor, updated_at = now()`,
+		bankAccountID, req.Currency, req.AccumulatedMinor)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"bank_account_id":   bankAccountID.String(),
+		"currency":          req.Currency,
+		"accumulated_minor": req.AccumulatedMinor,
+		"status":            "created",
+	})
+}
+
+// CreatePayoutAddress 创建出金地址
+func (h *Handler) CreatePayoutAddress(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MerchantID    string `json:"merchant_id"`
+		TargetAsset   string `json:"target_asset"`
+		TargetNetwork string `json:"target_network"`
+		FormatType    string `json:"address_format_type"`
+		TargetAddress string `json:"target_address"`
+		AddressLabel  string `json:"address_label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	ctx := r.Context()
+	merchantID, _ := uuid.Parse(req.MerchantID)
+
+	// R3-3 复修：出金地址经 domain.CleanAddress 做格式校验/哈希/掩码，
+	// 再经 Encryptor 加密后存 target_address_enc（之前直接存明文 + 把地址当 hash 是双重错误）。
+	if h.encryptor == nil {
+		writeErr(w, apperr.ErrInternal.WithMessage("encryptor not configured; refusing to store payout address in plaintext"))
+		return
+	}
+	cleaned := domain.CleanAddress(req.TargetAddress, validator.Network(req.TargetNetwork))
+	if !cleaned.IsValid {
+		writeErr(w, apperr.ErrInvalidArgument.WithMessage(cleaned.ValidationError))
+		return
+	}
+	addressEnc, err := h.encryptor.Encrypt(ctx, []byte(cleaned.TargetAddress), crypto.Meta{
+		TenantID: merchantID.String(), RecordID: "payout_address", FieldName: "target_address",
+	})
+	if err != nil {
+		writeErr(w, apperr.ErrInternal.WithMessage("encrypt address: "+err.Error()))
+		return
+	}
+
+	var id uuid.UUID
+	err = h.pool.QueryRow(ctx,
+		`INSERT INTO merchant_payout_address (
+			merchant_id, target_asset, target_network, address_format_type,
+			target_address_enc, target_address_hash, target_address_masked,
+			address_label, screening_status, whitelist_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending', 'Pending') RETURNING id`,
+		merchantID, req.TargetAsset, req.TargetNetwork, req.FormatType,
+		addressEnc, cleaned.AddressHash, cleaned.TargetAddressMasked, req.AddressLabel,
+	).Scan(&id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "created"})
 }

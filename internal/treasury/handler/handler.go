@@ -17,6 +17,7 @@ type TreasuryService interface {
 	Evaluate(ctx context.Context, cmd service.EvaluateCmd) (service.EvaluateResult, error)
 	Submit(ctx context.Context, transferID uuid.UUID) error
 	Reconcile(ctx context.Context, transferID uuid.UUID, bankRef string) error
+	ApproveSweep(ctx context.Context, approvalID uuid.UUID) error
 }
 
 type Handler struct {
@@ -176,6 +177,27 @@ func (h *Handler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "Confirmed"})
+}
+
+func (h *Handler) ApproveSweep(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("service not available"))
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	approvalID, err := uuid.Parse(id)
+	if err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid approval id"))
+		return
+	}
+
+	if err := h.svc.ApproveSweep(r.Context(), approvalID); err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "Approved"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

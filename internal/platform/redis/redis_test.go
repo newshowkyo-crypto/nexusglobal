@@ -2,11 +2,11 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -28,19 +28,31 @@ func setupTestRedis(t *testing.T) (*Client, func()) {
 		ContainerRequest: req,
 		Started:          true,
 	})
-	require.NoError(t, err)
+	if err != nil {
+		t.Skipf("skipping: cannot start container: %v", err)
+	}
 
 	host, err := container.Host(ctx)
-	require.NoError(t, err)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		t.Skipf("skipping: cannot get host: %v", err)
+	}
 
 	mappedPort, err := container.MappedPort(ctx, "6379")
-	require.NoError(t, err)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		t.Skipf("skipping: cannot get port: %v", err)
+	}
 
 	addr := host + ":" + mappedPort.Port()
 	client := NewClient(addr)
 
 	err = client.Ping(ctx)
-	require.NoError(t, err)
+	if err != nil {
+		client.Close()
+		_ = container.Terminate(ctx)
+		t.Skipf("skipping: cannot ping redis: %v", err)
+	}
 
 	cleanup := func() {
 		client.Close()
@@ -90,7 +102,7 @@ func TestRedis_ZSet(t *testing.T) {
 	assert.Contains(t, members, "member2")
 
 	now := float64(time.Now().Unix())
-	members, err = client.ZRangeByScore(ctx, key, "-inf", string(rune(int('0')+int(now))))
+	members, err = client.ZRangeByScore(ctx, key, "-inf", fmt.Sprintf("%f", now))
 	assert.NoError(t, err)
 	assert.Len(t, members, 1)
 	assert.Equal(t, "member1", members[0])

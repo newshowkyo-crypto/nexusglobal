@@ -29,6 +29,29 @@ func (q *Queries) CountDailySweeps(ctx context.Context, arg CountDailySweepsPara
 	return count, err
 }
 
+const getBankAccountBalance = `-- name: GetBankAccountBalance :one
+SELECT id, bank_account_id, currency, accumulated_minor, updated_at FROM bank_account_balance
+WHERE bank_account_id = $1 AND currency = $2
+`
+
+type GetBankAccountBalanceParams struct {
+	BankAccountID uuid.UUID `json:"bank_account_id"`
+	Currency      string    `json:"currency"`
+}
+
+func (q *Queries) GetBankAccountBalance(ctx context.Context, arg GetBankAccountBalanceParams) (BankAccountBalance, error) {
+	row := q.db.QueryRow(ctx, getBankAccountBalance, arg.BankAccountID, arg.Currency)
+	var i BankAccountBalance
+	err := row.Scan(
+		&i.ID,
+		&i.BankAccountID,
+		&i.Currency,
+		&i.AccumulatedMinor,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getBankingCalendar = `-- name: GetBankingCalendar :one
 SELECT id, calendar_name, jurisdiction, timezone, business_days, holidays, emergency_closure_dates, cut_off_matrix, status, created_at, updated_at FROM banking_calendar
 WHERE id = $1
@@ -312,6 +335,55 @@ func (q *Queries) InsertSweepTransfer(ctx context.Context, arg InsertSweepTransf
 	return i, err
 }
 
+const listSweepRules = `-- name: ListSweepRules :many
+SELECT id, source_bank_account_id, target_bank_account_id, currency, rail, beneficiary_type, same_name_verified, trigger_threshold_minor, sweep_ratio_bps, max_single_sweep_minor, min_residual_minor, time_window_matrix, scheduled_sweep_times, sweep_mode, max_daily_sweep_count, delay_queue_enabled, require_four_eyes, approval_threshold_minor, status, version, created_at, updated_at FROM sweep_rule
+WHERE status = 'Active'
+ORDER BY created_at
+`
+
+func (q *Queries) ListSweepRules(ctx context.Context) ([]SweepRule, error) {
+	rows, err := q.db.Query(ctx, listSweepRules)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SweepRule
+	for rows.Next() {
+		var i SweepRule
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceBankAccountID,
+			&i.TargetBankAccountID,
+			&i.Currency,
+			&i.Rail,
+			&i.BeneficiaryType,
+			&i.SameNameVerified,
+			&i.TriggerThresholdMinor,
+			&i.SweepRatioBps,
+			&i.MaxSingleSweepMinor,
+			&i.MinResidualMinor,
+			&i.TimeWindowMatrix,
+			&i.ScheduledSweepTimes,
+			&i.SweepMode,
+			&i.MaxDailySweepCount,
+			&i.DelayQueueEnabled,
+			&i.RequireFourEyes,
+			&i.ApprovalThresholdMinor,
+			&i.Status,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateSweepTransferStatus = `-- name: UpdateSweepTransferStatus :exec
 UPDATE sweep_transfer
 SET status = $2, version = version + 1, updated_at = now()
@@ -327,4 +399,128 @@ type UpdateSweepTransferStatusParams struct {
 func (q *Queries) UpdateSweepTransferStatus(ctx context.Context, arg UpdateSweepTransferStatusParams) error {
 	_, err := q.db.Exec(ctx, updateSweepTransferStatus, arg.ID, arg.Status, arg.Version)
 	return err
+}
+
+const insertSweepApproval = `-- name: InsertSweepApproval :one
+INSERT INTO sweep_approval (sweep_rule_id, merchant_id, amount_minor, currency, rail, beneficiary_type, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, sweep_rule_id, merchant_id, amount_minor, currency, rail, beneficiary_type, status, required_approvals, current_approvals, idempotency_key, created_at, updated_at
+`
+
+type InsertSweepApprovalParams struct {
+	SweepRuleID     uuid.UUID `json:"sweep_rule_id"`
+	MerchantID      uuid.UUID `json:"merchant_id"`
+	AmountMinor     int64     `json:"amount_minor"`
+	Currency        string    `json:"currency"`
+	Rail            string    `json:"rail"`
+	BeneficiaryType string    `json:"beneficiary_type"`
+	IdempotencyKey  string    `json:"idempotency_key"`
+}
+
+func (q *Queries) InsertSweepApproval(ctx context.Context, arg InsertSweepApprovalParams) (SweepApproval, error) {
+	row := q.db.QueryRow(ctx, insertSweepApproval,
+		arg.SweepRuleID,
+		arg.MerchantID,
+		arg.AmountMinor,
+		arg.Currency,
+		arg.Rail,
+		arg.BeneficiaryType,
+		arg.IdempotencyKey,
+	)
+	var i SweepApproval
+	err := row.Scan(
+		&i.ID,
+		&i.SweepRuleID,
+		&i.MerchantID,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Rail,
+		&i.BeneficiaryType,
+		&i.Status,
+		&i.RequiredApprovals,
+		&i.CurrentApprovals,
+		&i.IdempotencyKey,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getSweepApproval = `-- name: GetSweepApproval :one
+SELECT id, sweep_rule_id, merchant_id, amount_minor, currency, rail, beneficiary_type, status, required_approvals, current_approvals, idempotency_key, created_at, updated_at FROM sweep_approval
+WHERE id = $1
+`
+
+func (q *Queries) GetSweepApproval(ctx context.Context, id uuid.UUID) (SweepApproval, error) {
+	row := q.db.QueryRow(ctx, getSweepApproval, id)
+	var i SweepApproval
+	err := row.Scan(
+		&i.ID,
+		&i.SweepRuleID,
+		&i.MerchantID,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Rail,
+		&i.BeneficiaryType,
+		&i.Status,
+		&i.RequiredApprovals,
+		&i.CurrentApprovals,
+		&i.IdempotencyKey,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const approveSweepApproval = `-- name: ApproveSweepApproval :exec
+UPDATE sweep_approval
+SET current_approvals = current_approvals + 1,
+    status = CASE WHEN current_approvals + 1 >= required_approvals THEN 'Approved' ELSE 'Pending' END,
+    updated_at = now()
+WHERE id = $1 AND status = 'Pending'
+`
+
+func (q *Queries) ApproveSweepApproval(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, approveSweepApproval, id)
+	return err
+}
+
+const listPendingSweepApprovals = `-- name: ListPendingSweepApprovals :many
+SELECT id, sweep_rule_id, merchant_id, amount_minor, currency, rail, beneficiary_type, status, required_approvals, current_approvals, idempotency_key, created_at, updated_at FROM sweep_approval
+WHERE sweep_rule_id = $1 AND status = 'Pending'
+ORDER BY created_at
+`
+
+func (q *Queries) ListPendingSweepApprovals(ctx context.Context, sweepRuleID uuid.UUID) ([]SweepApproval, error) {
+	rows, err := q.db.Query(ctx, listPendingSweepApprovals, sweepRuleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SweepApproval
+	for rows.Next() {
+		var i SweepApproval
+		if err := rows.Scan(
+			&i.ID,
+			&i.SweepRuleID,
+			&i.MerchantID,
+			&i.AmountMinor,
+			&i.Currency,
+			&i.Rail,
+			&i.BeneficiaryType,
+			&i.Status,
+			&i.RequiredApprovals,
+			&i.CurrentApprovals,
+			&i.IdempotencyKey,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,18 +19,33 @@ type Repository interface {
 	GetConfig(ctx context.Context, id uuid.UUID) (*db.MaeConfiguration, error)
 	GetConfigByMAEID(ctx context.Context, maeID string) (*db.MaeConfiguration, error)
 	ListConfigs(ctx context.Context) ([]db.MaeConfiguration, error)
-	UpdateStatus(ctx context.Context, id uuid.UUID, status, reason string, version int32) error
+	UpdateStatus(ctx context.Context, id uuid.UUID, status, reason string, version int32, lockUntil *time.Time) error
 	RotateSecret(ctx context.Context, id uuid.UUID, apiKeyCiphertext, webhookSecretCiphertext []byte, version int32) error
 }
 
+// TestingFailCounter 持久化 Testing 态连续灰度失败次数（Redis）。
+// T1-1: 纯函数判定依赖真实失败计数，必须由此读取，不能传零值。
+type TestingFailCounter interface {
+	GetTestingFailCount(ctx context.Context, maeID string) (int32, error)
+	IncrTestingFailCount(ctx context.Context, maeID string) (int32, error)
+	ResetTestingFailCount(ctx context.Context, maeID string) error
+}
+
 type Service struct {
-	repo      Repository
-	encryptor *crypto.Encryptor
-	pool      *pgxpool.Pool
+	repo        Repository
+	encryptor   *crypto.Encryptor
+	pool        *pgxpool.Pool
+	failCounter TestingFailCounter
 }
 
 func New(repo Repository, encryptor *crypto.Encryptor, pool *pgxpool.Pool) *Service {
 	return &Service{repo: repo, encryptor: encryptor, pool: pool}
+}
+
+// WithFailCounter 注入 Testing 失败计数器（Redis 实现）。
+func (s *Service) WithFailCounter(fc TestingFailCounter) *Service {
+	s.failCounter = fc
+	return s
 }
 
 type CreateMAECmd struct {
@@ -123,7 +140,7 @@ func (s *Service) ChangeStatus(ctx context.Context, cmd ChangeStatusCmd) error {
 			"cannot transition from " + string(currentStatus) + " to " + string(cmd.TargetStatus))
 	}
 
-	return s.repo.UpdateStatus(ctx, config.ID, string(cmd.TargetStatus), cmd.Reason, config.Version)
+	return s.repo.UpdateStatus(ctx, config.ID, string(cmd.TargetStatus), cmd.Reason, config.Version, nil)
 }
 
 func (s *Service) GetConfig(ctx context.Context, maeID string) (*db.MaeConfiguration, error) {
@@ -176,7 +193,16 @@ func (s *Service) EvaluateCircuitBreaker(ctx context.Context, metrics MetricRead
 		return nil
 	}
 
-	return s.repo.UpdateStatus(ctx, config.ID, string(domain.StatusCooldown), result.Reason, config.Version)
+	var lockUntil *time.Time
+	if result.Reason == "EXPOSURE_THRESHOLD" {
+		endOfDay := time.Date(
+			time.Now().Year(), time.Now().Month(), time.Now().Day(),
+			23, 59, 59, 0, time.UTC,
+		)
+		lockUntil = &endOfDay
+	}
+
+	return s.repo.UpdateStatus(ctx, config.ID, string(domain.StatusCooldown), result.Reason, config.Version, lockUntil)
 }
 
 type EvaluateTestingCmd struct {
@@ -201,6 +227,16 @@ func (s *Service) EvaluateTesting(ctx context.Context, cmd EvaluateTestingCmd) (
 		return domain.TestingResult{}, apperr.ErrIllegalTransition.WithMessage("MAE not in Testing status")
 	}
 
+	// T1-1: 读取真实连续失败计数，传入纯函数（否则 failCount 恒为 0，永不触发 Suspend）。
+	var priorFailCount int32
+	if s.failCounter != nil {
+		c, err := s.failCounter.GetTestingFailCount(ctx, cmd.MAEID)
+		if err != nil {
+			return domain.TestingResult{}, fmt.Errorf("get testing fail count: %w", err)
+		}
+		priorFailCount = c
+	}
+
 	result := domain.EvaluateTesting(domain.TestingInput{
 		TxnCount:              cmd.TxnCount,
 		TestingMinTxnCount:    config.TestingMinTxnCount,
@@ -211,11 +247,75 @@ func (s *Service) EvaluateTesting(ctx context.Context, cmd EvaluateTestingCmd) (
 		P95LatencyMs:          cmd.P95LatencyMs,
 		TestingMaxP95Latency:  config.TestingMaxP95LatencyMs,
 		CardTestingCount:      cmd.CardTestingCount,
+		TestingFailCount:      priorFailCount,
 	})
 
-	if err := s.repo.UpdateStatus(ctx, config.ID, string(result.TargetStatus), result.Reason, config.Version); err != nil {
+	if err := s.repo.UpdateStatus(ctx, config.ID, string(result.TargetStatus), result.Reason, config.Version, nil); err != nil {
 		return domain.TestingResult{}, err
 	}
 
+	// T1-1: 维护失败计数。达标晋级或被 Suspend 都清零；判定为 HOLD（未达标但未到阈值）则递增。
+	if s.failCounter != nil {
+		switch result.Decision {
+		case domain.TestingHold:
+			if _, err := s.failCounter.IncrTestingFailCount(ctx, cmd.MAEID); err != nil {
+				return domain.TestingResult{}, fmt.Errorf("incr testing fail count: %w", err)
+			}
+		case domain.TestingPromote, domain.TestingSuspend:
+			if err := s.failCounter.ResetTestingFailCount(ctx, cmd.MAEID); err != nil {
+				return domain.TestingResult{}, fmt.Errorf("reset testing fail count: %w", err)
+			}
+		}
+	}
+
 	return result, nil
+}
+
+// EvaluateTestingTimeout T1-1: 探测窗口超时巡检。
+// Testing 态停留超过 cooldown_minutes 仍未晋级 Active，判定探测窗口超时 → 回 Cooldown，
+// 同时清零失败计数（重新进入下一轮探测窗口）。返回是否发生超时迁移。
+func (s *Service) EvaluateTestingTimeout(ctx context.Context, maeID string, now time.Time) (bool, error) {
+	config, err := s.repo.GetConfigByMAEID(ctx, maeID)
+	if err != nil {
+		return false, err
+	}
+	if config == nil {
+		return false, apperr.ErrNotFound.WithMessage("MAE not found: " + maeID)
+	}
+
+	if domain.MAEStatus(config.Status) != domain.StatusTesting {
+		return false, nil
+	}
+
+	// cooldown_minutes <= 0 视为不启用超时巡检，避免误判。
+	if config.CooldownMinutes <= 0 {
+		return false, nil
+	}
+
+	// UpdatedAt 在状态切入 Testing 时被刷新，作为进入 Testing 的时间基准。
+	if !config.UpdatedAt.Valid {
+		return false, nil
+	}
+	enteredAt := config.UpdatedAt.Time
+	deadline := enteredAt.Add(time.Duration(config.CooldownMinutes) * time.Minute)
+	if !now.After(deadline) {
+		return false, nil
+	}
+
+	if !domain.CanTransition(domain.StatusTesting, domain.StatusCooldown) {
+		return false, apperr.ErrIllegalTransition.WithMessage("cannot transition Testing to Cooldown")
+	}
+
+	if err := s.repo.UpdateStatus(ctx, config.ID, string(domain.StatusCooldown),
+		"TESTING_WINDOW_TIMEOUT", config.Version, nil); err != nil {
+		return false, err
+	}
+
+	if s.failCounter != nil {
+		if err := s.failCounter.ResetTestingFailCount(ctx, maeID); err != nil {
+			return false, fmt.Errorf("reset testing fail count on timeout: %w", err)
+		}
+	}
+
+	return true, nil
 }

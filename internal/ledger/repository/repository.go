@@ -12,6 +12,7 @@ import (
 
 	"github.com/nexusglobal/mamr/internal/ledger/domain"
 	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
+	"github.com/nexusglobal/mamr/internal/platform/money"
 )
 
 type Repository struct {
@@ -83,10 +84,9 @@ func (r *Repository) GetTransactionByIdempotencyKey(ctx context.Context, idempot
 	}, nil
 }
 
+// decimalToNumeric converts a decimal to pgtype.Numeric for DB writes.
+// Delegates to money.DecimalToNumeric (StringFixed(4)); a previous hand-rolled
+// version negated the exponent and corrupted every fractional amount.
 func decimalToNumeric(d decimal.Decimal) (pgtype.Numeric, error) {
-	return pgtype.Numeric{
-		Int:   d.Coefficient(),
-		Exp:   -int32(d.Exponent()),
-		Valid: true,
-	}, nil
+	return money.DecimalToNumeric(d), nil
 }

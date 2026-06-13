@@ -36,6 +36,12 @@ SELECT * FROM merchant_payout_address
 WHERE merchant_id = $1
 ORDER BY created_at;
 
+-- name: ListPayoutRequestsByStatus :many
+SELECT * FROM payout_request
+WHERE status = $1
+ORDER BY created_at
+LIMIT $2;
+
 -- name: InsertPayoutRequest :one
 INSERT INTO payout_request (
     merchant_id, payout_address_id, amount, fiat_currency,
@@ -46,6 +52,11 @@ RETURNING *;
 -- name: GetPayoutRequest :one
 SELECT * FROM payout_request
 WHERE id = $1;
+
+-- name: LockPayoutRequestForUpdate :one
+SELECT * FROM payout_request
+WHERE id = $1
+FOR UPDATE;
 
 -- name: GetPayoutRequestByIdempotencyKey :one
 SELECT * FROM payout_request
@@ -81,5 +92,29 @@ WHERE id = $1;
 
 -- name: FailOutboxEvent :exec
 UPDATE transactional_outbox
-SET status = 'Failed', retry_count = retry_count + 1, updated_at = now()
+SET status = 'Failed', retry_count = retry_count + 1,
+    next_retry_at = now() + (interval '1 minute' * (1 << LEAST(retry_count, 6))),
+    updated_at = now()
 WHERE id = $1;
+
+-- name: UpdateOutboxStatus :exec
+UPDATE transactional_outbox
+SET status = $2, updated_at = now()
+WHERE id = $1;
+
+-- name: InsertReserveBatch :one
+INSERT INTO reserve_batch (merchant_id, currency, amount_minor, hold_date, release_date, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING *;
+
+-- name: ListDueReserveBatches :many
+SELECT * FROM reserve_batch
+WHERE release_date <= CURRENT_DATE AND status = 'Held'
+ORDER BY release_date
+LIMIT $1;
+
+-- name: UpdateReserveBatchStatus :exec
+UPDATE reserve_batch
+SET status = $2, updated_at = now()
+WHERE id = $1;
+

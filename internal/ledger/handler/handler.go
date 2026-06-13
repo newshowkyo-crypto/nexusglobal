@@ -6,11 +6,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/shopspring/decimal"
 
 	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
+	"github.com/nexusglobal/mamr/internal/platform/money"
 )
 
 type BalanceResponse struct {
@@ -61,11 +60,11 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pending := numericToDecimal(account.PendingBalance)
-	settled := numericToDecimal(account.SettledBalance)
-	reserve := numericToDecimal(account.ReserveBalance)
-	frozen := numericToDecimal(account.FrozenPayoutBalance)
-	dispute := numericToDecimal(account.DisputeHoldBalance)
+	pending := money.NumericToDecimal(account.PendingBalance)
+	settled := money.NumericToDecimal(account.SettledBalance)
+	reserve := money.NumericToDecimal(account.ReserveBalance)
+	frozen := money.NumericToDecimal(account.FrozenPayoutBalance)
+	dispute := money.NumericToDecimal(account.DisputeHoldBalance)
 	available := settled.Sub(reserve).Sub(frozen).Sub(dispute)
 
 	updatedAt := ""
@@ -85,25 +84,6 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		Version:                account.Version,
 		UpdatedAt:              updatedAt,
 	})
-}
-
-func numericToDecimal(n pgtype.Numeric) decimal.Decimal {
-	if !n.Valid {
-		return decimal.Zero
-	}
-	d, _ := decimal.NewFromString(n.Int.String())
-	if n.Exp < 0 {
-		divisor := decimal.NewFromInt(1)
-		for i := int32(0); i < -n.Exp; i++ {
-			divisor = divisor.Mul(decimal.NewFromInt(10))
-		}
-		return d.Div(divisor)
-	}
-	multiplier := decimal.NewFromInt(1)
-	for i := int32(0); i < n.Exp; i++ {
-		multiplier = multiplier.Mul(decimal.NewFromInt(10))
-	}
-	return d.Mul(multiplier)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

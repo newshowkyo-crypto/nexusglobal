@@ -159,7 +159,7 @@ const (
 )
 
 type SweepTriggerInput struct {
-	AccumulatedMinor int64
+	NetSweepAmount   int64 // T3-1: 使用净额（扣 ratio/residual 后）
 	DailySweepCount  int
 	Rule             *SweepRule
 	WithinWindow     bool
@@ -174,7 +174,12 @@ func EvaluateSweepTrigger(input SweepTriggerInput) SweepDecision {
 		return SweepAccumulate
 	}
 
-	if input.AccumulatedMinor < input.Rule.TriggerThresholdMinor {
+	// T3-1: 净额为 0 或负数不触发 SUBMIT
+	if input.NetSweepAmount <= 0 {
+		return SweepAccumulate
+	}
+
+	if input.NetSweepAmount < input.Rule.TriggerThresholdMinor {
 		return SweepAccumulate
 	}
 

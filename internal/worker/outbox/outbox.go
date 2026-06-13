@@ -6,7 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nexusglobal/mamr/internal/payout/repository"
+	"github.com/google/uuid"
+	"github.com/nexusglobal/mamr/internal/payout/repository/db"
 )
 
 type EventProcessor func(ctx context.Context, event OutboxEvent) error
@@ -28,8 +29,15 @@ type Config struct {
 	MaxRetries   int
 }
 
+type OutboxRepo interface {
+	ClaimOutboxBatch(ctx context.Context, lockedBy string, limit int32) ([]db.TransactionalOutbox, error)
+	AckOutboxEvent(ctx context.Context, id uuid.UUID) error
+	FailOutboxEvent(ctx context.Context, id uuid.UUID) error
+	UpdateOutboxStatus(ctx context.Context, id uuid.UUID, status string) error
+}
+
 type Worker struct {
-	repo      *repository.Repository
+	repo      OutboxRepo
 	processor EventProcessor
 	config    Config
 	logger    *slog.Logger
@@ -37,7 +45,7 @@ type Worker struct {
 	wg        sync.WaitGroup
 }
 
-func New(repo *repository.Repository, processor EventProcessor, config Config, logger *slog.Logger) *Worker {
+func New(repo OutboxRepo, processor EventProcessor, config Config, logger *slog.Logger) *Worker {
 	return &Worker{
 		repo:      repo,
 		processor: processor,
@@ -101,12 +109,22 @@ func (w *Worker) run(ctx context.Context, workerID int) {
 				logger.Warn("max retries reached, dead letter",
 					"event_id", evt.ID, "event_type", evt.EventType,
 					"retry_count", evt.RetryCount)
+				if err := w.repo.UpdateOutboxStatus(ctx, event.ID, "DeadLetter"); err != nil {
+					logger.Error("dead letter event failed", "event_id", evt.ID, "err", err)
+				}
 				continue
 			}
 
 			if err := w.processor(ctx, evt); err != nil {
 				logger.Error("process outbox event failed",
 					"event_id", evt.ID, "event_type", evt.EventType, "err", err)
+				if failErr := w.repo.FailOutboxEvent(ctx, event.ID); failErr != nil {
+					logger.Error("fail outbox event failed", "event_id", evt.ID, "err", failErr)
+				}
+			} else {
+				if ackErr := w.repo.AckOutboxEvent(ctx, event.ID); ackErr != nil {
+					logger.Error("ack outbox event failed", "event_id", evt.ID, "err", ackErr)
+				}
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 )
 
@@ -69,4 +70,29 @@ func ToMinor(d decimal.Decimal) Minor {
 
 func ValidateNoFloat64() {
 	_ = big.NewInt(0)
+}
+
+func NumericToDecimal(n pgtype.Numeric) decimal.Decimal {
+	if !n.Valid {
+		return decimal.Zero
+	}
+	d, _ := decimal.NewFromString(n.Int.String())
+	if n.Exp < 0 {
+		divisor := decimal.NewFromInt(1)
+		for i := int32(0); i < -n.Exp; i++ {
+			divisor = divisor.Mul(decimal.NewFromInt(10))
+		}
+		return d.Div(divisor)
+	}
+	multiplier := decimal.NewFromInt(1)
+	for i := int32(0); i < n.Exp; i++ {
+		multiplier = multiplier.Mul(decimal.NewFromInt(10))
+	}
+	return d.Mul(multiplier)
+}
+
+func DecimalToNumeric(d decimal.Decimal) pgtype.Numeric {
+	var n pgtype.Numeric
+	_ = n.Scan(d.StringFixed(4))
+	return n
 }

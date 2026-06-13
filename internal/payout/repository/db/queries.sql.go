@@ -77,7 +77,9 @@ func (q *Queries) ClaimOutboxBatch(ctx context.Context, arg ClaimOutboxBatchPara
 
 const failOutboxEvent = `-- name: FailOutboxEvent :exec
 UPDATE transactional_outbox
-SET status = 'Failed', retry_count = retry_count + 1, updated_at = now()
+SET status = 'Failed', retry_count = retry_count + 1,
+    next_retry_at = now() + (interval '1 minute' * (1 << LEAST(retry_count, 6))),
+    updated_at = now()
 WHERE id = $1
 `
 
@@ -113,7 +115,7 @@ func (q *Queries) GetPayoutAddress(ctx context.Context, id uuid.UUID) (MerchantP
 }
 
 const getPayoutRequest = `-- name: GetPayoutRequest :one
-SELECT id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, provider_ref, lock_id, version, created_at, updated_at FROM payout_request
+SELECT id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, payload_hash, provider_ref, lock_id, version, created_at, updated_at, reconcile_attempts, last_reconcile_at, manual_review, manual_review_reason FROM payout_request
 WHERE id = $1
 `
 
@@ -130,17 +132,22 @@ func (q *Queries) GetPayoutRequest(ctx context.Context, id uuid.UUID) (PayoutReq
 		&i.TargetNetwork,
 		&i.Status,
 		&i.IdempotencyKey,
+		&i.PayloadHash,
 		&i.ProviderRef,
 		&i.LockID,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReconcileAttempts,
+		&i.LastReconcileAt,
+		&i.ManualReview,
+		&i.ManualReviewReason,
 	)
 	return i, err
 }
 
 const getPayoutRequestByIdempotencyKey = `-- name: GetPayoutRequestByIdempotencyKey :one
-SELECT id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, provider_ref, lock_id, version, created_at, updated_at FROM payout_request
+SELECT id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, payload_hash, provider_ref, lock_id, version, created_at, updated_at, reconcile_attempts, last_reconcile_at, manual_review, manual_review_reason FROM payout_request
 WHERE idempotency_key = $1
 `
 
@@ -157,11 +164,16 @@ func (q *Queries) GetPayoutRequestByIdempotencyKey(ctx context.Context, idempote
 		&i.TargetNetwork,
 		&i.Status,
 		&i.IdempotencyKey,
+		&i.PayloadHash,
 		&i.ProviderRef,
 		&i.LockID,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReconcileAttempts,
+		&i.LastReconcileAt,
+		&i.ManualReview,
+		&i.ManualReviewReason,
 	)
 	return i, err
 }
@@ -260,9 +272,9 @@ func (q *Queries) InsertPayoutAddress(ctx context.Context, arg InsertPayoutAddre
 const insertPayoutRequest = `-- name: InsertPayoutRequest :one
 INSERT INTO payout_request (
     merchant_id, payout_address_id, amount, fiat_currency,
-    target_asset, target_network, status, idempotency_key
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, provider_ref, lock_id, version, created_at, updated_at
+    target_asset, target_network, status, idempotency_key, payload_hash
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, payload_hash, provider_ref, lock_id, version, created_at, updated_at, reconcile_attempts, last_reconcile_at, manual_review, manual_review_reason
 `
 
 type InsertPayoutRequestParams struct {
@@ -274,6 +286,7 @@ type InsertPayoutRequestParams struct {
 	TargetNetwork   string         `json:"target_network"`
 	Status          string         `json:"status"`
 	IdempotencyKey  string         `json:"idempotency_key"`
+	PayloadHash     string         `json:"payload_hash"`
 }
 
 func (q *Queries) InsertPayoutRequest(ctx context.Context, arg InsertPayoutRequestParams) (PayoutRequest, error) {
@@ -286,6 +299,7 @@ func (q *Queries) InsertPayoutRequest(ctx context.Context, arg InsertPayoutReque
 		arg.TargetNetwork,
 		arg.Status,
 		arg.IdempotencyKey,
+		arg.PayloadHash,
 	)
 	var i PayoutRequest
 	err := row.Scan(
@@ -298,9 +312,54 @@ func (q *Queries) InsertPayoutRequest(ctx context.Context, arg InsertPayoutReque
 		&i.TargetNetwork,
 		&i.Status,
 		&i.IdempotencyKey,
+		&i.PayloadHash,
 		&i.ProviderRef,
 		&i.LockID,
 		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReconcileAttempts,
+		&i.LastReconcileAt,
+		&i.ManualReview,
+		&i.ManualReviewReason,
+	)
+	return i, err
+}
+
+const insertReserveBatch = `-- name: InsertReserveBatch :one
+INSERT INTO reserve_batch (merchant_id, currency, amount_minor, hold_date, release_date, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, merchant_id, currency, amount_minor, hold_date, release_date, status, idempotency_key, created_at, updated_at
+`
+
+type InsertReserveBatchParams struct {
+	MerchantID     uuid.UUID   `json:"merchant_id"`
+	Currency       string      `json:"currency"`
+	AmountMinor    int64       `json:"amount_minor"`
+	HoldDate       pgtype.Date `json:"hold_date"`
+	ReleaseDate    pgtype.Date `json:"release_date"`
+	IdempotencyKey string      `json:"idempotency_key"`
+}
+
+func (q *Queries) InsertReserveBatch(ctx context.Context, arg InsertReserveBatchParams) (ReserveBatch, error) {
+	row := q.db.QueryRow(ctx, insertReserveBatch,
+		arg.MerchantID,
+		arg.Currency,
+		arg.AmountMinor,
+		arg.HoldDate,
+		arg.ReleaseDate,
+		arg.IdempotencyKey,
+	)
+	var i ReserveBatch
+	err := row.Scan(
+		&i.ID,
+		&i.MerchantID,
+		&i.Currency,
+		&i.AmountMinor,
+		&i.HoldDate,
+		&i.ReleaseDate,
+		&i.Status,
+		&i.IdempotencyKey,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -335,6 +394,44 @@ func (q *Queries) InsertTreasuryLedger(ctx context.Context, arg InsertTreasuryLe
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listDueReserveBatches = `-- name: ListDueReserveBatches :many
+SELECT id, merchant_id, currency, amount_minor, hold_date, release_date, status, idempotency_key, created_at, updated_at FROM reserve_batch
+WHERE release_date <= CURRENT_DATE AND status = 'Held'
+ORDER BY release_date
+LIMIT $1
+`
+
+func (q *Queries) ListDueReserveBatches(ctx context.Context, limit int32) ([]ReserveBatch, error) {
+	rows, err := q.db.Query(ctx, listDueReserveBatches, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReserveBatch
+	for rows.Next() {
+		var i ReserveBatch
+		if err := rows.Scan(
+			&i.ID,
+			&i.MerchantID,
+			&i.Currency,
+			&i.AmountMinor,
+			&i.HoldDate,
+			&i.ReleaseDate,
+			&i.Status,
+			&i.IdempotencyKey,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listPayoutAddresses = `-- name: ListPayoutAddresses :many
@@ -377,6 +474,58 @@ func (q *Queries) ListPayoutAddresses(ctx context.Context, merchantID uuid.UUID)
 	return items, nil
 }
 
+const listPayoutRequestsByStatus = `-- name: ListPayoutRequestsByStatus :many
+SELECT id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, provider_ref, lock_id, version, created_at, updated_at, reconcile_attempts, last_reconcile_at, manual_review, manual_review_reason FROM payout_request
+WHERE status = $1
+ORDER BY created_at
+LIMIT $2
+`
+
+type ListPayoutRequestsByStatusParams struct {
+	Status string `json:"status"`
+	Limit  int32  `json:"limit"`
+}
+
+func (q *Queries) ListPayoutRequestsByStatus(ctx context.Context, arg ListPayoutRequestsByStatusParams) ([]PayoutRequest, error) {
+	rows, err := q.db.Query(ctx, listPayoutRequestsByStatus, arg.Status, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PayoutRequest
+	for rows.Next() {
+		var i PayoutRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.MerchantID,
+			&i.PayoutAddressID,
+			&i.Amount,
+			&i.FiatCurrency,
+			&i.TargetAsset,
+			&i.TargetNetwork,
+			&i.Status,
+			&i.IdempotencyKey,
+			&i.PayloadHash,
+			&i.ProviderRef,
+			&i.LockID,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ReconcileAttempts,
+			&i.LastReconcileAt,
+			&i.ManualReview,
+			&i.ManualReviewReason,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockBalanceForUpdate = `-- name: LockBalanceForUpdate :one
 SELECT id, merchant_id, currency, pending_balance, settled_balance, reserve_balance, frozen_payout_balance, dispute_hold_balance, available_payout_balance, version, updated_at FROM merchant_treasury_ledger
 WHERE merchant_id = $1 AND currency = $2
@@ -403,6 +552,38 @@ func (q *Queries) LockBalanceForUpdate(ctx context.Context, arg LockBalanceForUp
 		&i.AvailablePayoutBalance,
 		&i.Version,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockPayoutRequestForUpdate = `-- name: LockPayoutRequestForUpdate :one
+SELECT id, merchant_id, payout_address_id, amount, fiat_currency, target_asset, target_network, status, idempotency_key, provider_ref, lock_id, version, created_at, updated_at, reconcile_attempts, last_reconcile_at, manual_review, manual_review_reason FROM payout_request
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) LockPayoutRequestForUpdate(ctx context.Context, id uuid.UUID) (PayoutRequest, error) {
+	row := q.db.QueryRow(ctx, lockPayoutRequestForUpdate, id)
+	var i PayoutRequest
+	err := row.Scan(
+		&i.ID,
+		&i.MerchantID,
+		&i.PayoutAddressID,
+		&i.Amount,
+		&i.FiatCurrency,
+		&i.TargetAsset,
+		&i.TargetNetwork,
+		&i.Status,
+		&i.IdempotencyKey,
+		&i.ProviderRef,
+		&i.LockID,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReconcileAttempts,
+		&i.LastReconcileAt,
+		&i.ManualReview,
+		&i.ManualReviewReason,
 	)
 	return i, err
 }
@@ -445,6 +626,22 @@ func (q *Queries) UpdateBalance(ctx context.Context, arg UpdateBalanceParams) er
 	return err
 }
 
+const updateOutboxStatus = `-- name: UpdateOutboxStatus :exec
+UPDATE transactional_outbox
+SET status = $2, updated_at = now()
+WHERE id = $1
+`
+
+type UpdateOutboxStatusParams struct {
+	ID     uuid.UUID `json:"id"`
+	Status string    `json:"status"`
+}
+
+func (q *Queries) UpdateOutboxStatus(ctx context.Context, arg UpdateOutboxStatusParams) error {
+	_, err := q.db.Exec(ctx, updateOutboxStatus, arg.ID, arg.Status)
+	return err
+}
+
 const updatePayoutRequestStatus = `-- name: UpdatePayoutRequestStatus :exec
 UPDATE payout_request
 SET status = $2, version = version + 1, updated_at = now()
@@ -459,5 +656,21 @@ type UpdatePayoutRequestStatusParams struct {
 
 func (q *Queries) UpdatePayoutRequestStatus(ctx context.Context, arg UpdatePayoutRequestStatusParams) error {
 	_, err := q.db.Exec(ctx, updatePayoutRequestStatus, arg.ID, arg.Status, arg.Version)
+	return err
+}
+
+const updateReserveBatchStatus = `-- name: UpdateReserveBatchStatus :exec
+UPDATE reserve_batch
+SET status = $2, updated_at = now()
+WHERE id = $1
+`
+
+type UpdateReserveBatchStatusParams struct {
+	ID     uuid.UUID `json:"id"`
+	Status string    `json:"status"`
+}
+
+func (q *Queries) UpdateReserveBatchStatus(ctx context.Context, arg UpdateReserveBatchStatusParams) error {
+	_, err := q.db.Exec(ctx, updateReserveBatchStatus, arg.ID, arg.Status)
 	return err
 }

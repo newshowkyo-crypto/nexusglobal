@@ -2,22 +2,26 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/nexusglobal/mamr/internal/mae/domain"
+	"github.com/nexusglobal/mamr/internal/mae/metric"
 	"github.com/nexusglobal/mamr/internal/mae/service"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
 )
 
 type Handler struct {
-	svc *service.Service
+	svc     *service.Service
+	metrics *metric.Aggregator
 }
 
-func New(svc *service.Service) *Handler {
-	return &Handler{svc: svc}
+func New(svc *service.Service, metrics *metric.Aggregator) *Handler {
+	return &Handler{svc: svc, metrics: metrics}
 }
 
 type CreateMAEResponse struct {
@@ -198,56 +202,84 @@ func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	businessDate := metric.FormatBusinessDate(time.Now())
+	var snapshot metric.Snapshot
+	if h.metrics != nil {
+		snapshot, _ = h.metrics.TakeSnapshot(r.Context(), maeID, businessDate)
+	}
+
 	writeJSON(w, http.StatusOK, MetricsResponse{
 		MAEID:                         maeID,
-		BusinessDate:                  "2026-06-12",
-		DailyCapturedAmountMinor:      "0",
+		BusinessDate:                  businessDate,
+		DailyCapturedAmountMinor:      fmt.Sprintf("%d", snapshot.CapturedMinor),
 		DailySettledAmountMinor:       "0",
-		DailyGrossExposureAmountMinor: "0",
-		DailyRefundAmountMinor:        "0",
-		DailyDisputeAmountMinor:       "0",
-		AbnormalRateBps:               0,
-		P95LatencyMs:                  0,
-		CardTestingCount:              0,
+		DailyGrossExposureAmountMinor: fmt.Sprintf("%d", snapshot.GrossExposureMinor),
+		DailyRefundAmountMinor:        fmt.Sprintf("%d", snapshot.RefundMinor),
+		DailyDisputeAmountMinor:       fmt.Sprintf("%d", snapshot.DisputeMinor),
+		AbnormalRateBps:               snapshot.AbnormalRateBps,
+		P95LatencyMs:                  snapshot.P95LatencyMs,
+		CardTestingCount:              snapshot.CardTestingCount,
 		Status:                        status,
 	})
 }
 
 func (h *Handler) CircuitBreak(w http.ResponseWriter, r *http.Request) {
-	if h.svc == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "Cooldown"})
-		return
-	}
 	maeID := chi.URLParam(r, "mae_id")
 	if maeID == "" {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("mae_id required"))
 		return
 	}
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("service not initialized"))
+		return
+	}
+
+	businessDate := metric.FormatBusinessDate(time.Now())
+	var exposure int64
+	var cardTesting int32
+	if h.metrics != nil {
+		exposure, _ = h.metrics.GetExposure(r.Context(), maeID, businessDate)
+	}
+
+	err := h.svc.EvaluateCircuitBreaker(r.Context(), h.metrics, service.EvaluateCircuitBreakerCmd{
+		MAEID:            maeID,
+		BusinessDate:     businessDate,
+		CardTestingCount: cardTesting,
+	})
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
 	config, err := h.svc.GetConfig(r.Context(), maeID)
 	if err != nil || config == nil {
 		writeError(w, apperr.ErrNotFound.WithMessage("MAE not found"))
 		return
 	}
+
 	lockDate := ""
 	if config.BusinessDayLockUntil.Valid {
 		lockDate = config.BusinessDayLockUntil.Time.Format("2006-01-02")
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":                  "Cooldown",
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":                  config.Status,
 		"business_day_lock_until": lockDate,
+		"gross_exposure_minor":    exposure,
 	})
 }
 
 func (h *Handler) TestingEvaluate(w http.ResponseWriter, r *http.Request) {
-	if h.svc == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"decision": "PROMOTE", "status": "Active"})
-		return
-	}
 	maeID := chi.URLParam(r, "mae_id")
 	if maeID == "" {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("mae_id required"))
 		return
 	}
+	if h.svc == nil {
+		writeError(w, apperr.ErrInternal.WithMessage("service not initialized"))
+		return
+	}
+
 	config, err := h.svc.GetConfig(r.Context(), maeID)
 	if err != nil || config == nil {
 		writeError(w, apperr.ErrNotFound.WithMessage("MAE not found"))
@@ -257,7 +289,20 @@ func (h *Handler) TestingEvaluate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apperr.ErrIllegalTransition.WithMessage("MAE not in Testing status"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"decision": "PROMOTE", "status": "Active"})
+
+	result, err := h.svc.EvaluateTesting(r.Context(), service.EvaluateTestingCmd{
+		MAEID: maeID,
+	})
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"decision":      result.Decision,
+		"target_status": result.TargetStatus,
+		"reason":        result.Reason,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

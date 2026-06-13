@@ -39,6 +39,7 @@ func TestHandleMAE_MissingSignature(t *testing.T) {
 }
 
 func TestHandleMAE_Success(t *testing.T) {
+	// T2-1: repo 为 nil 时必须拒绝，不能跳过验签
 	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
@@ -47,14 +48,11 @@ func TestHandleMAE_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp WebhookResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.True(t, resp.Received)
-	assert.NotEmpty(t, resp.IdempotencyKey)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestHandleBank_Success(t *testing.T) {
+	// T2-1: repo 为 nil 时必须拒绝，不能跳过验签
 	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
@@ -63,10 +61,11 @@ func TestHandleBank_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestHandleLP_Success(t *testing.T) {
+	// T2-1: repo 为 nil 时必须拒绝，不能跳过验签
 	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
@@ -75,10 +74,11 @@ func TestHandleLP_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestListEvents_Success(t *testing.T) {
+	// G6: repo 为 nil 时返回 500
 	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
@@ -86,10 +86,11 @@ func TestListEvents_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestReplay_Success(t *testing.T) {
+	// R2-2: repo 为 nil 时返回 500
 	h := New(nil, nil, nil)
 	r := setupRouter(h)
 
@@ -98,10 +99,7 @@ func TestReplay_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]bool
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.True(t, resp["replayed"])
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestReplay_InvalidID(t *testing.T) {

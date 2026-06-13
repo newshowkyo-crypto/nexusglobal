@@ -25,7 +25,7 @@ func setupRouter(h *Handler) *chi.Mux {
 }
 
 func newTestHandler() *Handler {
-	return New(nil)
+	return New(nil, nil)
 }
 
 func TestCreate_Success(t *testing.T) {
@@ -85,7 +85,7 @@ func TestGetMetrics_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestCircuitBreak_Success(t *testing.T) {
+func TestCircuitBreak_NoService(t *testing.T) {
 	h := newTestHandler()
 	r := setupRouter(h)
 
@@ -93,10 +93,10 @@ func TestCircuitBreak_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-func TestTestingEvaluate_Success(t *testing.T) {
+func TestTestingEvaluate_NoService(t *testing.T) {
 	h := newTestHandler()
 	r := setupRouter(h)
 
@@ -104,7 +104,7 @@ func TestTestingEvaluate_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestGetMetrics_Response(t *testing.T) {

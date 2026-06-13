@@ -47,3 +47,12 @@ WHERE id = $1 AND version = $3;
 -- name: CountDailySweeps :one
 SELECT COUNT(*) FROM sweep_transfer
 WHERE sweep_rule_id = $1 AND created_at >= $2 AND status != 'Failed';
+
+-- name: GetBankAccountBalance :one
+SELECT * FROM bank_account_balance
+WHERE bank_account_id = $1 AND currency = $2;
+
+-- name: ListSweepRules :many
+SELECT * FROM sweep_rule
+WHERE status = 'Active'
+ORDER BY created_at;

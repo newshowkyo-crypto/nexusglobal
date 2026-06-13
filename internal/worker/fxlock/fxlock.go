@@ -10,13 +10,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 
 	"github.com/nexusglobal/mamr/internal/payout/domain"
 	"github.com/nexusglobal/mamr/internal/payout/repository"
 	"github.com/nexusglobal/mamr/internal/payout/repository/db"
+	"github.com/nexusglobal/mamr/internal/platform/money"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
 	"github.com/nexusglobal/mamr/internal/worker/outbox"
 	"github.com/nexusglobal/mamr/pkg/external/lp"
@@ -71,7 +70,7 @@ func (w *Worker) Handle(ctx context.Context, event outbox.OutboxEvent) error {
 		return nil
 	}
 
-	amt := numericToDecimal(payoutReq.Amount)
+	amt := money.NumericToDecimal(payoutReq.Amount)
 
 	lockReq := lp.FXLockRequest{
 		PayoutRequestID: payoutID,
@@ -114,6 +113,11 @@ func (w *Worker) Handle(ctx context.Context, event outbox.OutboxEvent) error {
 			return fmt.Errorf("update status: %w", err)
 		}
 
+		// G2: 持久化 lock_id
+		if err := w.repo.UpdatePayoutRequestLockID(ctx, tx, payoutID, lockResult.LockID); err != nil {
+			return fmt.Errorf("update lock_id: %w", err)
+		}
+
 		_, err := w.repo.InsertOutboxEvent(ctx, tx, db.InsertOutboxEventParams{
 			AggregateType:  "payout_request",
 			AggregateID:    payoutID,
@@ -133,19 +137,4 @@ func (w *Worker) setStatus(ctx context.Context, payoutID uuid.UUID, status strin
 	return w.txm.WithinTx(ctx, func(tx pgx.Tx) error {
 		return w.repo.UpdatePayoutRequestStatus(ctx, tx, payoutID, status, version)
 	})
-}
-
-func numericToDecimal(n pgtype.Numeric) decimal.Decimal {
-	if !n.Valid {
-		return decimal.Zero
-	}
-	d, _ := decimal.NewFromString(n.Int.String())
-	if n.Exp < 0 {
-		divisor := decimal.NewFromInt(1)
-		for i := int32(0); i < -n.Exp; i++ {
-			divisor = divisor.Mul(decimal.NewFromInt(10))
-		}
-		return d.Div(divisor)
-	}
-	return d
 }

@@ -75,3 +75,34 @@ func (r *Repository) GetReceiverProxy(ctx context.Context, providerType, provide
 	}
 	return &row, nil
 }
+
+func (r *Repository) ListIngressEvents(ctx context.Context, providerType string, limit int) ([]db.WebhookIngressEvent, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, provider_type, provider_id, provider_event_id, event_type, 
+		        idempotency_key, payload_hash, raw_payload_ciphertext, status, 
+		        error_message, created_at, updated_at
+		 FROM webhook_ingress_event 
+		 WHERE provider_type = $1 
+		 ORDER BY created_at DESC 
+		 LIMIT $2`,
+		providerType, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []db.WebhookIngressEvent
+	for rows.Next() {
+		var e db.WebhookIngressEvent
+		if err := rows.Scan(
+			&e.ID, &e.ProviderType, &e.ProviderID, &e.ProviderEventID,
+			&e.EventType, &e.IdempotencyKey, &e.PayloadHash,
+			&e.RawPayloadCiphertext, &e.Status, &e.ErrorMessage,
+			&e.CreatedAt, &e.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}

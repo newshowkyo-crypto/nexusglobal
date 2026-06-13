@@ -99,3 +99,62 @@ func (r *Repository) CountDailySweeps(ctx context.Context, ruleID uuid.UUID, sin
 		CreatedAt:   since,
 	})
 }
+
+func (r *Repository) GetBankAccountBalance(ctx context.Context, bankAccountID uuid.UUID, currency string) (int64, error) {
+	q := db.New(r.pool)
+	row, err := q.GetBankAccountBalance(ctx, db.GetBankAccountBalanceParams{
+		BankAccountID: bankAccountID,
+		Currency:      currency,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return row.AccumulatedMinor, nil
+}
+
+func (r *Repository) DecrementBankAccountBalance(ctx context.Context, bankAccountID uuid.UUID, currency string, amount int64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE bank_account_balance SET accumulated_minor = accumulated_minor - $1, updated_at = now()
+		 WHERE bank_account_id = $2 AND currency = $3 AND accumulated_minor >= $1`,
+		amount, bankAccountID, currency)
+	return err
+}
+
+func (r *Repository) ListSweepRules(ctx context.Context) ([]db.SweepRule, error) {
+	q := db.New(r.pool)
+	return q.ListSweepRules(ctx)
+}
+
+func (r *Repository) InsertSweepApproval(ctx context.Context, params db.InsertSweepApprovalParams) (*db.SweepApproval, error) {
+	q := db.New(r.pool)
+	row, err := q.InsertSweepApproval(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (r *Repository) GetSweepApproval(ctx context.Context, id uuid.UUID) (*db.SweepApproval, error) {
+	q := db.New(r.pool)
+	row, err := q.GetSweepApproval(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (r *Repository) ApproveSweepApproval(ctx context.Context, id uuid.UUID) error {
+	q := db.New(r.pool)
+	return q.ApproveSweepApproval(ctx, id)
+}
+
+func (r *Repository) ListPendingSweepApprovals(ctx context.Context, ruleID uuid.UUID) ([]db.SweepApproval, error) {
+	q := db.New(r.pool)
+	return q.ListPendingSweepApprovals(ctx, ruleID)
+}

@@ -9,6 +9,14 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type BankAccountBalance struct {
+	ID               uuid.UUID          `json:"id"`
+	BankAccountID    uuid.UUID          `json:"bank_account_id"`
+	Currency         string             `json:"currency"`
+	AccumulatedMinor int64              `json:"accumulated_minor"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
 type BankingCalendar struct {
 	ID                    uuid.UUID          `json:"id"`
 	CalendarName          string             `json:"calendar_name"`
@@ -123,20 +131,38 @@ type MerchantTreasuryLedger struct {
 }
 
 type PayoutRequest struct {
-	ID              uuid.UUID          `json:"id"`
-	MerchantID      uuid.UUID          `json:"merchant_id"`
-	PayoutAddressID uuid.UUID          `json:"payout_address_id"`
-	Amount          pgtype.Numeric     `json:"amount"`
-	FiatCurrency    string             `json:"fiat_currency"`
-	TargetAsset     string             `json:"target_asset"`
-	TargetNetwork   string             `json:"target_network"`
-	Status          string             `json:"status"`
-	IdempotencyKey  string             `json:"idempotency_key"`
-	ProviderRef     string             `json:"provider_ref"`
-	LockID          string             `json:"lock_id"`
-	Version         int32              `json:"version"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                 uuid.UUID          `json:"id"`
+	MerchantID         uuid.UUID          `json:"merchant_id"`
+	PayoutAddressID    uuid.UUID          `json:"payout_address_id"`
+	Amount             pgtype.Numeric     `json:"amount"`
+	FiatCurrency       string             `json:"fiat_currency"`
+	TargetAsset        string             `json:"target_asset"`
+	TargetNetwork      string             `json:"target_network"`
+	Status             string             `json:"status"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	PayloadHash        string             `json:"payload_hash"`
+	ProviderRef        string             `json:"provider_ref"`
+	LockID             string             `json:"lock_id"`
+	Version            int32              `json:"version"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	ReconcileAttempts  int32              `json:"reconcile_attempts"`
+	LastReconcileAt    pgtype.Timestamptz `json:"last_reconcile_at"`
+	ManualReview       bool               `json:"manual_review"`
+	ManualReviewReason string             `json:"manual_review_reason"`
+}
+
+type ReserveBatch struct {
+	ID             uuid.UUID          `json:"id"`
+	MerchantID     uuid.UUID          `json:"merchant_id"`
+	Currency       string             `json:"currency"`
+	AmountMinor    int64              `json:"amount_minor"`
+	HoldDate       pgtype.Date        `json:"hold_date"`
+	ReleaseDate    pgtype.Date        `json:"release_date"`
+	Status         string             `json:"status"`
+	IdempotencyKey string             `json:"idempotency_key"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
 type SweepRule struct {
@@ -212,15 +238,19 @@ type WebhookIngressEvent struct {
 }
 
 type WebhookReceiverProxy struct {
-	ID               uuid.UUID          `json:"id"`
-	ProviderType     string             `json:"provider_type"`
-	ProviderID       string             `json:"provider_id"`
-	WebhookUrl       string             `json:"webhook_url"`
-	SignatureAlgo    string             `json:"signature_algo"`
-	SecretCiphertext []byte             `json:"secret_ciphertext"`
-	IpAllowlist      []byte             `json:"ip_allowlist"`
-	RateLimit        int32              `json:"rate_limit"`
-	Status           string             `json:"status"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ID                     uuid.UUID          `json:"id"`
+	ProviderType           string             `json:"provider_type"`
+	ProviderID             string             `json:"provider_id"`
+	WebhookUrl             string             `json:"webhook_url"`
+	SignatureAlgo          string             `json:"signature_algo"`
+	SecretCiphertext       []byte             `json:"secret_ciphertext"`
+	IpAllowlist            []byte             `json:"ip_allowlist"`
+	RateLimit              int32              `json:"rate_limit"`
+	Status                 string             `json:"status"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	ProxyCode              string             `json:"proxy_code"`
+	CertificateFingerprint string             `json:"certificate_fingerprint"`
+	CertificateExpiresAt   pgtype.Timestamptz `json:"certificate_expires_at"`
+	SecretVersion          int32              `json:"secret_version"`
 }

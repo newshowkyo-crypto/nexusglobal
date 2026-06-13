@@ -117,8 +117,8 @@ func TestEvaluateBeneficiary_Unknown(t *testing.T) {
 
 func TestEvaluateSweepTrigger_Submit(t *testing.T) {
 	input := SweepTriggerInput{
-		AccumulatedMinor: 50000000,
-		DailySweepCount:  0,
+		NetSweepAmount:  50000000,
+		DailySweepCount: 0,
 		Rule: &SweepRule{
 			TriggerThresholdMinor: 50000000,
 			MaxDailySweepCount:    2,
@@ -131,8 +131,8 @@ func TestEvaluateSweepTrigger_Submit(t *testing.T) {
 
 func TestEvaluateSweepTrigger_Accumulate_BelowThreshold(t *testing.T) {
 	input := SweepTriggerInput{
-		AccumulatedMinor: 10000000,
-		DailySweepCount:  0,
+		NetSweepAmount:  10000000,
+		DailySweepCount: 0,
 		Rule: &SweepRule{
 			TriggerThresholdMinor: 50000000,
 			MaxDailySweepCount:    2,
@@ -144,8 +144,8 @@ func TestEvaluateSweepTrigger_Accumulate_BelowThreshold(t *testing.T) {
 
 func TestEvaluateSweepTrigger_Accumulate_MaxCountReached(t *testing.T) {
 	input := SweepTriggerInput{
-		AccumulatedMinor: 50000000,
-		DailySweepCount:  2,
+		NetSweepAmount:  50000000,
+		DailySweepCount: 2,
 		Rule: &SweepRule{
 			TriggerThresholdMinor: 50000000,
 			MaxDailySweepCount:    2,
@@ -157,7 +157,7 @@ func TestEvaluateSweepTrigger_Accumulate_MaxCountReached(t *testing.T) {
 
 func TestEvaluateSweepTrigger_Delayed_OutsideWindow(t *testing.T) {
 	input := SweepTriggerInput{
-		AccumulatedMinor: 50000000,
+		NetSweepAmount: 50000000,
 		Rule: &SweepRule{
 			TriggerThresholdMinor: 50000000,
 			DelayQueueEnabled:     true,
@@ -169,8 +169,8 @@ func TestEvaluateSweepTrigger_Delayed_OutsideWindow(t *testing.T) {
 
 func TestEvaluateSweepTrigger_ApprovalRequired(t *testing.T) {
 	input := SweepTriggerInput{
-		AccumulatedMinor: 50000000,
-		DailySweepCount:  0,
+		NetSweepAmount:  50000000,
+		DailySweepCount: 0,
 		Rule: &SweepRule{
 			TriggerThresholdMinor: 50000000,
 			MaxDailySweepCount:    2,

@@ -12,6 +12,7 @@ import (
 
 type Querier interface {
 	CountDailySweeps(ctx context.Context, arg CountDailySweepsParams) (int64, error)
+	GetBankAccountBalance(ctx context.Context, arg GetBankAccountBalanceParams) (BankAccountBalance, error)
 	GetBankingCalendar(ctx context.Context, id uuid.UUID) (BankingCalendar, error)
 	GetBankingCalendarByName(ctx context.Context, calendarName string) (BankingCalendar, error)
 	GetSweepRule(ctx context.Context, id uuid.UUID) (SweepRule, error)
@@ -19,6 +20,7 @@ type Querier interface {
 	InsertBankingCalendar(ctx context.Context, arg InsertBankingCalendarParams) (BankingCalendar, error)
 	InsertSweepRule(ctx context.Context, arg InsertSweepRuleParams) (SweepRule, error)
 	InsertSweepTransfer(ctx context.Context, arg InsertSweepTransferParams) (SweepTransfer, error)
+	ListSweepRules(ctx context.Context) ([]SweepRule, error)
 	UpdateSweepTransferStatus(ctx context.Context, arg UpdateSweepTransferStatusParams) error
 }
 

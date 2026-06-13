@@ -32,6 +32,38 @@ func disputeKey(maeID, businessDate string) string {
 	return fmt.Sprintf("MAE_METRIC:%s:%s:dispute_amount", maeID, businessDate)
 }
 
+// T1-1: 连续灰度失败计数器 key（按 mae 维度，不分业务日，跨日累积直到达标或熔断）。
+func testingFailKey(maeID string) string {
+	return fmt.Sprintf("MAE_TESTING_FAIL:%s", maeID)
+}
+
+// GetTestingFailCount 读取当前连续灰度失败次数。key 不存在视为 0。
+func (a *Aggregator) GetTestingFailCount(ctx context.Context, maeID string) (int32, error) {
+	n, err := a.rdb.Get(ctx, testingFailKey(maeID)).Int64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return int32(n), nil
+}
+
+// IncrTestingFailCount 失败次数 +1，返回累加后的值。设置 7 天 TTL 防止僵尸 key。
+func (a *Aggregator) IncrTestingFailCount(ctx context.Context, maeID string) (int32, error) {
+	n, err := a.rdb.Incr(ctx, testingFailKey(maeID)).Result()
+	if err != nil {
+		return 0, err
+	}
+	_ = a.rdb.Expire(ctx, testingFailKey(maeID), 7*24*time.Hour).Err()
+	return int32(n), nil
+}
+
+// ResetTestingFailCount 达标晋升后清零计数。
+func (a *Aggregator) ResetTestingFailCount(ctx context.Context, maeID string) error {
+	return a.rdb.Del(ctx, testingFailKey(maeID)).Err()
+}
+
 func (a *Aggregator) OnCaptured(ctx context.Context, maeID, businessDate string, amountMinor int64) error {
 	pipe := a.rdb.Pipeline()
 	pipe.IncrBy(ctx, exposureKey(maeID, businessDate), amountMinor)

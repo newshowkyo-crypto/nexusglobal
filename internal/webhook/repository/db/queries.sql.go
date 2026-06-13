@@ -62,7 +62,7 @@ func (q *Queries) GetIngressEventByIdempotencyKey(ctx context.Context, idempoten
 }
 
 const getReceiverProxy = `-- name: GetReceiverProxy :one
-SELECT id, provider_type, provider_id, webhook_url, signature_algo, secret_ciphertext, ip_allowlist, rate_limit, status, created_at, updated_at FROM webhook_receiver_proxy
+SELECT id, provider_type, provider_id, webhook_url, signature_algo, secret_ciphertext, ip_allowlist, rate_limit, status, created_at, updated_at, proxy_code, certificate_fingerprint, certificate_expires_at, secret_version FROM webhook_receiver_proxy
 WHERE provider_type = $1 AND provider_id = $2
 `
 
@@ -86,6 +86,10 @@ func (q *Queries) GetReceiverProxy(ctx context.Context, arg GetReceiverProxyPara
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ProxyCode,
+		&i.CertificateFingerprint,
+		&i.CertificateExpiresAt,
+		&i.SecretVersion,
 	)
 	return i, err
 }

@@ -20,11 +20,17 @@ type Querier interface {
 	InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) (TransactionalOutbox, error)
 	InsertPayoutAddress(ctx context.Context, arg InsertPayoutAddressParams) (MerchantPayoutAddress, error)
 	InsertPayoutRequest(ctx context.Context, arg InsertPayoutRequestParams) (PayoutRequest, error)
+	InsertReserveBatch(ctx context.Context, arg InsertReserveBatchParams) (ReserveBatch, error)
 	InsertTreasuryLedger(ctx context.Context, arg InsertTreasuryLedgerParams) (MerchantTreasuryLedger, error)
+	ListDueReserveBatches(ctx context.Context, limit int32) ([]ReserveBatch, error)
 	ListPayoutAddresses(ctx context.Context, merchantID uuid.UUID) ([]MerchantPayoutAddress, error)
+	ListPayoutRequestsByStatus(ctx context.Context, arg ListPayoutRequestsByStatusParams) ([]PayoutRequest, error)
 	LockBalanceForUpdate(ctx context.Context, arg LockBalanceForUpdateParams) (MerchantTreasuryLedger, error)
+	LockPayoutRequestForUpdate(ctx context.Context, id uuid.UUID) (PayoutRequest, error)
 	UpdateBalance(ctx context.Context, arg UpdateBalanceParams) error
+	UpdateOutboxStatus(ctx context.Context, arg UpdateOutboxStatusParams) error
 	UpdatePayoutRequestStatus(ctx context.Context, arg UpdatePayoutRequestStatusParams) error
+	UpdateReserveBatchStatus(ctx context.Context, arg UpdateReserveBatchStatusParams) error
 }
 
 var _ Querier = (*Queries)(nil)

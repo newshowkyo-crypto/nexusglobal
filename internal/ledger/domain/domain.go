@@ -28,10 +28,12 @@ const (
 type TransactionType string
 
 const (
-	TxnTypePayoutFreeze  TransactionType = "PAYOUT_FREEZE"
-	TxnTypePayoutConfirm TransactionType = "PAYOUT_CONFIRM"
-	TxnTypePayoutRelease TransactionType = "PAYOUT_RELEASE"
-	TxnTypeReversal      TransactionType = "REVERSAL"
+	TxnTypePayoutFreeze   TransactionType = "PAYOUT_FREEZE"
+	TxnTypePayoutConfirm  TransactionType = "PAYOUT_CONFIRM"
+	TxnTypePayoutRelease  TransactionType = "PAYOUT_RELEASE"
+	TxnTypeReserveHold    TransactionType = "RESERVE_HOLD"
+	TxnTypeReserveRelease TransactionType = "RESERVE_RELEASE"
+	TxnTypeReversal       TransactionType = "REVERSAL"
 )
 
 type Entry struct {
