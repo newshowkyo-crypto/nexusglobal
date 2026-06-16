@@ -28,6 +28,7 @@ type FXLockResult struct {
 	LockID    string
 	Rate      decimal.Decimal
 	ExpiresAt time.Time
+	GasFee    int64 // Gas 费用（最小单位）
 }
 
 type PayoutRequest struct {

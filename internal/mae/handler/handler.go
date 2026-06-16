@@ -34,7 +34,7 @@ type CreateMAEResponse struct {
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if h.svc == nil {
-		writeJSON(w, http.StatusCreated, CreateMAEResponse{ID: "stub-id", MAEID: "stub", Status: "Draft", Version: 0, CreatedAt: "2026-06-12T00:00:00Z"})
+		writeError(w, apperr.ErrInternal.WithMessage("service not initialized"))
 		return
 	}
 	var raw struct {
@@ -120,7 +120,63 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.svc == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"mae_id": maeID, "status": "Updated"})
+		writeError(w, apperr.ErrInternal.WithMessage("service not initialized"))
+		return
+	}
+
+	var raw struct {
+		DisplayName              string   `json:"display_name"`
+		MAEType                  string   `json:"mae_type"`
+		TenantScope              []string `json:"tenant_scope"`
+		Jurisdiction             string   `json:"jurisdiction"`
+		SupportedCurrencies      []string `json:"supported_currencies"`
+		APIBaseURL               string   `json:"api_base_url"`
+		WebhookProxyURL          string   `json:"webhook_proxy_url"`
+		RiskLabel                string   `json:"risk_label"`
+		DailyVmaxMinor           int64    `json:"daily_vmax_minor"`
+		MonthlyVmaxMinor         int64    `json:"monthly_vmax_minor"`
+		CmaxBps                  int32    `json:"cmax_bps"`
+		CardTestingLimit         int32    `json:"card_testing_limit"`
+		RoutingWeight            int32    `json:"routing_weight"`
+		CooldownMinutes          int32    `json:"cooldown_minutes"`
+		TestingTrafficBps        int32    `json:"testing_traffic_bps"`
+		TestingMinTxnCount       int32    `json:"testing_min_txn_count"`
+		TestingMinSuccessRateBps int32    `json:"testing_min_success_rate_bps"`
+		TestingMaxP95LatencyMs   int32    `json:"testing_max_p95_latency_ms"`
+		Version                  int32    `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+
+	tenantScopeJSON, _ := json.Marshal(raw.TenantScope)
+	currenciesJSON, _ := json.Marshal(raw.SupportedCurrencies)
+
+	err := h.svc.Update(r.Context(), service.UpdateMAECmd{
+		MAEID:                    maeID,
+		DisplayName:              raw.DisplayName,
+		MAEType:                  raw.MAEType,
+		TenantScope:              tenantScopeJSON,
+		Jurisdiction:             raw.Jurisdiction,
+		SupportedCurrencies:      currenciesJSON,
+		APIBaseURL:               raw.APIBaseURL,
+		WebhookProxyURL:          raw.WebhookProxyURL,
+		RiskLabel:                raw.RiskLabel,
+		DailyVmaxMinor:           raw.DailyVmaxMinor,
+		MonthlyVmaxMinor:         raw.MonthlyVmaxMinor,
+		CmaxBps:                  raw.CmaxBps,
+		CardTestingLimit:         raw.CardTestingLimit,
+		RoutingWeight:            raw.RoutingWeight,
+		CooldownMinutes:          raw.CooldownMinutes,
+		TestingTrafficBps:        raw.TestingTrafficBps,
+		TestingMinTxnCount:       raw.TestingMinTxnCount,
+		TestingMinSuccessRateBps: raw.TestingMinSuccessRateBps,
+		TestingMaxP95LatencyMs:   raw.TestingMaxP95LatencyMs,
+		Version:                  raw.Version,
+	})
+	if err != nil {
+		writeAppErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"mae_id": maeID, "status": "Updated"})
@@ -133,10 +189,31 @@ func (h *Handler) RotateSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.svc == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"rotated_at": "2026-06-12T08:00:00Z", "secret_version": "v2"})
+		writeError(w, apperr.ErrInternal.WithMessage("service not initialized"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"rotated_at": "2026-06-12T08:00:00Z", "secret_version": "v2"})
+
+	var raw struct {
+		APIKey        string `json:"api_key"`
+		WebhookSecret string `json:"webhook_secret"`
+		Version       int32  `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+
+	err := h.svc.RotateSecret(r.Context(), service.RotateSecretCmd{
+		MAEID:         maeID,
+		APIKey:        raw.APIKey,
+		WebhookSecret: raw.WebhookSecret,
+		Version:       raw.Version,
+	})
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"rotated_at": time.Now().UTC().Format("2006-01-02T15:04:05Z"), "secret_version": "v2"})
 }
 
 type ChangeStatusRequest struct {
@@ -147,7 +224,7 @@ type ChangeStatusRequest struct {
 
 func (h *Handler) ChangeStatus(w http.ResponseWriter, r *http.Request) {
 	if h.svc == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "Changed"})
+		writeError(w, apperr.ErrInternal.WithMessage("service not initialized"))
 		return
 	}
 	maeID := chi.URLParam(r, "mae_id")

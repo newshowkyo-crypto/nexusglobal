@@ -14,13 +14,16 @@ var (
 )
 
 type PaymentRequest struct {
-	OrderID    string
-	MerchantID string
-	Amount     decimal.Decimal
-	Currency   string
-	CardNumber string // 不落库，仅传给支付网关
-	CardExpiry string
-	CardCVV    string
+	OrderID            string
+	MerchantID         string
+	Amount             decimal.Decimal
+	Currency           string
+	CardNumber         string // 不落库，仅传给 mock 支付网关（local/mock 模式）
+	CardExpiry         string
+	CardCVV            string // 不落库，仅传给 mock 支付网关（local/mock 模式）
+	CardBIN            string // 卡 BIN 用于风控
+	BuyerIP            string // 买家 IP 用于风控
+	PaymentMethodToken string // tokenized payment method（real 模式必须使用）
 }
 
 type PaymentResult struct {
@@ -37,6 +40,7 @@ type PaymentGateway interface {
 type MockPaymentGateway struct {
 	defaultScenario Scenario
 	scenarios       map[string]Scenario
+	timeoutDelay    time.Duration
 }
 
 type Scenario string
@@ -51,6 +55,7 @@ func NewMockPaymentGateway() *MockPaymentGateway {
 	return &MockPaymentGateway{
 		defaultScenario: ScenarioSuccess,
 		scenarios:       make(map[string]Scenario),
+		timeoutDelay:    35 * time.Second,
 	}
 }
 
@@ -60,6 +65,10 @@ func (m *MockPaymentGateway) SetScenario(key string, s Scenario) {
 
 func (m *MockPaymentGateway) SetDefaultScenario(s Scenario) {
 	m.defaultScenario = s
+}
+
+func (m *MockPaymentGateway) SetTimeoutDelay(d time.Duration) {
+	m.timeoutDelay = d
 }
 
 func (m *MockPaymentGateway) scenarioFor(key string) Scenario {
@@ -74,8 +83,12 @@ func (m *MockPaymentGateway) Charge(ctx context.Context, req PaymentRequest) (*P
 
 	switch scenario {
 	case ScenarioTimeout:
-		time.Sleep(35 * time.Second) // 超过 30s 超时
-		return nil, ErrPaymentTimeout
+		select {
+		case <-time.After(m.timeoutDelay):
+			return nil, ErrPaymentTimeout
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	case ScenarioFailure:
 		return nil, ErrPaymentFailed
 	default:

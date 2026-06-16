@@ -36,6 +36,10 @@ func (m *mockRepo) RotateSecret(_ context.Context, _ uuid.UUID, _, _ []byte, _ i
 	return nil
 }
 
+func (m *mockRepo) UpdateConfig(_ context.Context, _ db.UpdateMAEConfigParams) error {
+	return nil
+}
+
 func toJSON(v interface{}) []byte {
 	b, _ := json.Marshal(v)
 	return b

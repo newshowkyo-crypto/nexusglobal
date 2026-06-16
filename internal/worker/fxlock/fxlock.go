@@ -19,23 +19,27 @@ import (
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
 	"github.com/nexusglobal/mamr/internal/worker/outbox"
 	"github.com/nexusglobal/mamr/pkg/external/lp"
+
+	"github.com/nexusglobal/mamr/internal/ledger/fee"
 )
 
 type Worker struct {
-	repo   *repository.Repository
-	lpCli  lp.Client
-	txm    *postgres.TxManager
-	pool   *pgxpool.Pool
-	logger *slog.Logger
+	repo       *repository.Repository
+	lpCli      lp.Client
+	feeService fee.FeeServiceInterface
+	txm        *postgres.TxManager
+	pool       *pgxpool.Pool
+	logger     *slog.Logger
 }
 
-func New(repo *repository.Repository, lpCli lp.Client, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger) *Worker {
+func New(repo *repository.Repository, lpCli lp.Client, feeService fee.FeeServiceInterface, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger) *Worker {
 	return &Worker{
-		repo:   repo,
-		lpCli:  lpCli,
-		txm:    txm,
-		pool:   pool,
-		logger: logger,
+		repo:       repo,
+		lpCli:      lpCli,
+		feeService: feeService,
+		txm:        txm,
+		pool:       pool,
+		logger:     logger,
 	}
 }
 
@@ -106,6 +110,23 @@ func (w *Worker) Handle(ctx context.Context, event outbox.OutboxEvent) error {
 		"lock_id":           lockResult.LockID,
 	})
 	outboxKey := "lp_payout:" + payoutID.String()
+
+	// 记录 GAS_FEE（如果费用服务可用且有 gas 费用）
+	if w.feeService != nil && lockResult.GasFee > 0 {
+		feeDetails := []fee.FeeDetail{
+			{
+				FeeType:    fee.FeeTypeGas,
+				Amount:     lockResult.GasFee,
+				SourceData: map[string]interface{}{"payout_id": payoutID.String(), "lock_id": lockResult.LockID, "network": payoutReq.TargetNetwork, "asset": payoutReq.TargetAsset},
+			},
+		}
+		// 异步记录费用，不阻塞主流程
+		go func() {
+			if err := w.feeService.AllocateTransactionFees(context.Background(), payoutID, payoutReq.MerchantID, payoutReq.FiatCurrency, feeDetails); err != nil {
+				w.logger.Error("failed to allocate gas fee", "payout_id", payoutID, "error", err)
+			}
+		}()
+	}
 
 	return w.txm.WithinTx(ctx, func(tx pgx.Tx) error {
 		if err := w.repo.UpdatePayoutRequestStatus(ctx, tx,

@@ -10,6 +10,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	ledgerrepo "github.com/nexusglobal/mamr/internal/ledger/repository"
+	ledgerservice "github.com/nexusglobal/mamr/internal/ledger/service"
 	maedomain "github.com/nexusglobal/mamr/internal/mae/domain"
 	maemetric "github.com/nexusglobal/mamr/internal/mae/metric"
 	maerepo "github.com/nexusglobal/mamr/internal/mae/repository"
@@ -80,8 +82,12 @@ func main() {
 	repo := payoutrepo.New(pool)
 	ledgerRepo := payoutrepo.NewLedgerRepo(pool)
 
-	fxlockWorker := fxlock.New(repo, deps.LP, txm, pool, log)
-	payoutWorker := payoutworker.New(repo, ledgerRepo, deps.LP, txm, pool, log)
+	// 初始化费用摊销服务
+	feeRepo := ledgerrepo.NewFeeRepo(pool)
+	feeService := ledgerservice.NewFeeService(feeRepo)
+
+	fxlockWorker := fxlock.New(repo, deps.LP, feeService, txm, pool, log)
+	payoutWorker := payoutworker.New(repo, ledgerRepo, deps.LP, feeService, txm, pool, log)
 
 	// rdb 已在启动时保证非 nil（reconcile 分布式锁强依赖 Redis）
 	locker := reconcile.NewRedisLockProvider(rdb)

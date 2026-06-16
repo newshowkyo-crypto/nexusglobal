@@ -37,7 +37,7 @@ func TestHandle_InvalidEventType(t *testing.T) {
 	lpCli := new(mockLPClient)
 	logger := slog.Default()
 
-	worker := New(nil, lpCli, nil, nil, logger)
+	worker := New(nil, lpCli, nil, nil, nil, logger)
 
 	event := outbox.OutboxEvent{
 		EventType: "INVALID_EVENT",
@@ -55,7 +55,7 @@ func TestHandle_InvalidPayload(t *testing.T) {
 	lpCli := new(mockLPClient)
 	logger := slog.Default()
 
-	worker := New(nil, lpCli, nil, nil, logger)
+	worker := New(nil, lpCli, nil, nil, nil, logger)
 
 	event := outbox.OutboxEvent{
 		EventType: "FX_LOCK_REQUESTED",
@@ -73,7 +73,7 @@ func TestHandle_InvalidPayoutID(t *testing.T) {
 	lpCli := new(mockLPClient)
 	logger := slog.Default()
 
-	worker := New(nil, lpCli, nil, nil, logger)
+	worker := New(nil, lpCli, nil, nil, nil, logger)
 
 	event := outbox.OutboxEvent{
 		EventType: "FX_LOCK_REQUESTED",

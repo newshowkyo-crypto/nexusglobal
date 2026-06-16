@@ -47,6 +47,10 @@ func (r *recordingRepo) RotateSecret(_ context.Context, _ uuid.UUID, _, _ []byte
 	return nil
 }
 
+func (r *recordingRepo) UpdateConfig(_ context.Context, _ db.UpdateMAEConfigParams) error {
+	return nil
+}
+
 // memFailCounter 内存版连续失败计数器，模拟 Redis 行为。
 type memFailCounter struct {
 	counts map[string]int32

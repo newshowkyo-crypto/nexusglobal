@@ -3,12 +3,17 @@ package checkout
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
+	"github.com/nexusglobal/mamr/internal/risk/carding/domain"
 	"github.com/nexusglobal/mamr/internal/token"
 )
 
@@ -32,6 +37,7 @@ type CheckoutData struct {
 }
 
 type TokenValidator interface {
+	Create(ctx context.Context, cmd token.CreateTokenCmd) (*token.Token, error)
 	Redeem(ctx context.Context, cmd token.RedeemTokenCmd) (*token.Token, error)
 }
 
@@ -39,18 +45,27 @@ type OrderProvider interface {
 	GetOrderDetails(ctx context.Context, orderID string) (*CheckoutData, error)
 }
 
+// RiskGateway 风控网关接口（用于测试 mock）
+type RiskGateway interface {
+	Check(ctx context.Context, req domain.CheckRequest) domain.CheckResult
+	RecordFailure(ctx context.Context, req domain.CheckRequest)
+	RecordSuccess(ctx context.Context, req domain.CheckRequest)
+}
+
 type Handler struct {
 	tokenSvc      TokenValidator
 	orderProvider OrderProvider
 	paymentGW     PaymentGateway
+	riskGateway   RiskGateway
 	tmpl          *template.Template
 }
 
-func NewHandler(tokenSvc TokenValidator, orderProvider OrderProvider, paymentGW PaymentGateway, tmpl *template.Template) *Handler {
+func NewHandler(tokenSvc TokenValidator, orderProvider OrderProvider, paymentGW PaymentGateway, riskGateway RiskGateway, tmpl *template.Template) *Handler {
 	return &Handler{
 		tokenSvc:      tokenSvc,
 		orderProvider: orderProvider,
 		paymentGW:     paymentGW,
+		riskGateway:   riskGateway,
 		tmpl:          tmpl,
 	}
 }
@@ -117,6 +132,41 @@ func (h *Handler) ServeCheckoutPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) HandleCreateToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OrderID    string `json:"order_id"`
+		Amount     string `json:"amount"`
+		Currency   string `json:"currency"`
+		MerchantID string `json:"merchant_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request"})
+		return
+	}
+
+	if req.OrderID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing order_id"})
+		return
+	}
+
+	tkn, err := h.tokenSvc.Create(r.Context(), token.CreateTokenCmd{
+		OrderID:    req.OrderID,
+		MerchantID: req.MerchantID,
+		MaxUses:    1,
+		TTL:        15 * time.Minute,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create token"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token":      tkn.Value,
+		"expires_at": tkn.ExpiresAt.Format(time.RFC3339),
+	})
+}
+
 func (h *Handler) HandleValidateToken(w http.ResponseWriter, r *http.Request) {
 	tokenValue := r.URL.Query().Get("token")
 	if tokenValue == "" {
@@ -168,10 +218,11 @@ func (h *Handler) HandleValidateToken(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Token      string `json:"token"`
-		CardNumber string `json:"card_number"`
-		CardExpiry string `json:"card_expiry"`
-		CardCVV    string `json:"card_cvv"`
+		Token              string `json:"token"`
+		CardNumber         string `json:"card_number"`
+		CardExpiry         string `json:"card_expiry"`
+		CardCVV            string `json:"card_cvv"`
+		PaymentMethodToken string `json:"payment_method_token"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -205,7 +256,7 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 	// R3-1: 获取订单详情
 	amount := decimal.NewFromInt(0)
 	currency := "USD"
-	merchantID := ""
+	merchantID := tkn.MerchantID
 
 	if h.orderProvider != nil {
 		details, err := h.orderProvider.GetOrderDetails(r.Context(), tkn.OrderID)
@@ -218,6 +269,58 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 风控检查：在调用 acquirer 前检查
+	if h.riskGateway != nil {
+		// 提取买家 IP
+		buyerIP := extractClientIP(r)
+
+		// 提取 BIN（卡号前6-8位）
+		cardBIN := ""
+		if len(req.CardNumber) >= 6 {
+			if len(req.CardNumber) >= 8 {
+				cardBIN = req.CardNumber[:8]
+			} else {
+				cardBIN = req.CardNumber[:6]
+			}
+		}
+
+		// 解析 merchantID 为 UUID
+		merchantUUID, _ := uuid.Parse(merchantID)
+
+		riskResult := h.riskGateway.Check(r.Context(), domain.CheckRequest{
+			MerchantID: merchantUUID,
+			AppID:      merchantID, // 使用 merchantID 作为 appID
+			BuyerIP:    buyerIP,
+			CardBIN:    cardBIN,
+		})
+
+		// 风控拦截：返回 429 或 403
+		if riskResult.Decision == domain.DecisionBlock {
+			h.riskGateway.RecordFailure(r.Context(), domain.CheckRequest{
+				MerchantID: merchantUUID,
+				AppID:      merchantID,
+				BuyerIP:    buyerIP,
+				CardBIN:    cardBIN,
+			})
+			writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{
+				"error":       "risk_blocked",
+				"reason":      riskResult.Reason,
+				"blocked_by":  string(riskResult.BlockedBy),
+				"retry_after": 60,
+			})
+			return
+		}
+
+		if riskResult.Decision == domain.DecisionCooldown {
+			writeJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":       "merchant_in_cooldown",
+				"reason":      riskResult.Reason,
+				"retry_after": 60,
+			})
+			return
+		}
+	}
+
 	// R3-1: 调用支付网关扣款（不持久化卡号）
 	if h.paymentGW == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Payment gateway not configured"})
@@ -225,24 +328,72 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	paymentResult, err := h.paymentGW.Charge(r.Context(), PaymentRequest{
-		OrderID:    tkn.OrderID,
-		MerchantID: merchantID,
-		Amount:     amount,
-		Currency:   currency,
-		CardNumber: req.CardNumber, // 仅传给网关，不落库
-		CardExpiry: req.CardExpiry,
-		CardCVV:    req.CardCVV,
+		OrderID:            tkn.OrderID,
+		MerchantID:         merchantID,
+		Amount:             amount,
+		Currency:           currency,
+		CardNumber:         req.CardNumber, // 仅传给网关，不落库
+		CardExpiry:         req.CardExpiry,
+		CardCVV:            req.CardCVV,
+		PaymentMethodToken: req.PaymentMethodToken,
 	})
 	if err != nil {
-		switch err {
-		case ErrPaymentFailed:
+		// 记录失败到风控
+		if h.riskGateway != nil {
+			buyerIP := extractClientIP(r)
+			cardBIN := ""
+			if len(req.CardNumber) >= 6 {
+				if len(req.CardNumber) >= 8 {
+					cardBIN = req.CardNumber[:8]
+				} else {
+					cardBIN = req.CardNumber[:6]
+				}
+			}
+			merchantUUID, _ := uuid.Parse(merchantID)
+			h.riskGateway.RecordFailure(r.Context(), domain.CheckRequest{
+				MerchantID: merchantUUID,
+				AppID:      merchantID,
+				BuyerIP:    buyerIP,
+				CardBIN:    cardBIN,
+			})
+		}
+
+		// 使用 errors.Is 判断错误类型
+		switch {
+		case errors.Is(err, ErrPaymentFailed):
 			writeJSON(w, http.StatusPaymentRequired, map[string]string{"error": "Payment failed"})
-		case ErrPaymentTimeout:
+		case errors.Is(err, ErrPaymentTimeout):
 			writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "Payment timeout"})
+		case errors.Is(err, ErrRawCardNotAllowed):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Raw card not allowed in real mode, use payment_method_token"})
+		case errors.Is(err, ErrChannelNotFound):
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Channel not found"})
+		case errors.Is(err, ErrChannelDisabled):
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Channel disabled"})
 		default:
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Payment error"})
 		}
 		return
+	}
+
+	// 记录成功到风控（用于计算失败率）
+	if h.riskGateway != nil {
+		buyerIP := extractClientIP(r)
+		cardBIN := ""
+		if len(req.CardNumber) >= 6 {
+			if len(req.CardNumber) >= 8 {
+				cardBIN = req.CardNumber[:8]
+			} else {
+				cardBIN = req.CardNumber[:6]
+			}
+		}
+		merchantUUID, _ := uuid.Parse(merchantID)
+		h.riskGateway.RecordSuccess(r.Context(), domain.CheckRequest{
+			MerchantID: merchantUUID,
+			AppID:      merchantID,
+			BuyerIP:    buyerIP,
+			CardBIN:    cardBIN,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -252,6 +403,32 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 		"status":         paymentResult.Status,
 		"redirect_url":   "/checkout/success",
 	})
+}
+
+// extractClientIP 从请求中提取客户端 IP
+func extractClientIP(r *http.Request) string {
+	// 优先检查 X-Forwarded-For
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For 可能包含多个 IP，取第一个
+		ips := strings.Split(xff, ",")
+		if len(ips) > 0 {
+			return strings.TrimSpace(ips[0])
+		}
+	}
+	// 其次检查 X-Real-IP
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return xri
+	}
+	// 最后使用 RemoteAddr
+	ip := r.RemoteAddr
+	if idx := strings.LastIndex(ip, ":"); idx != -1 {
+		ip = ip[:idx]
+	}
+	// 移除 IPv6 地址的方括号
+	if strings.HasPrefix(ip, "[") && strings.HasSuffix(ip, "]") {
+		ip = ip[1 : len(ip)-1]
+	}
+	return ip
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

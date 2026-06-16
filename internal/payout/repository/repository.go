@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -279,40 +280,39 @@ func (r *LedgerRepo) GetOrCreateAccount(ctx context.Context, tx pgx.Tx, merchant
 func (r *LedgerRepo) PostTransaction(ctx context.Context, tx pgx.Tx, txn ledgerdomain.Transaction) (*ledgerdomain.Transaction, error) {
 	q := ledgerdb.New(r.pool).WithTx(tx)
 
-	aggUUID, _ := uuid.Parse(txn.AggregateID)
+	aggID, _ := uuid.Parse(txn.AggregateID)
 	insertTxn, err := q.InsertLedgerTransaction(ctx, ledgerdb.InsertLedgerTransactionParams{
 		IdempotencyKey:  txn.IdempotencyKey,
 		TransactionType: string(txn.TransactionType),
 		AggregateType:   txn.AggregateType,
-		AggregateID:     pgtype.UUID{Bytes: aggUUID, Valid: true},
+		AggregateID:     pgtype.UUID{Bytes: aggID, Valid: aggID != uuid.Nil},
 		Description:     txn.Description,
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	// 插入 ledger entries
 	for _, entry := range txn.Entries {
-		accUUID, _ := uuid.Parse(entry.AccountID)
-		num := money.DecimalToNumeric(entry.Amount)
+		amountNumeric := money.DecimalToNumeric(entry.Amount)
 		_, err := q.InsertLedgerEntry(ctx, ledgerdb.InsertLedgerEntryParams{
 			TransactionID: insertTxn.ID,
-			AccountID:     accUUID,
+			AccountID:     entry.AccountID,
 			Direction:     string(entry.Direction),
-			Amount:        num,
+			Amount:        amountNumeric,
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("insert ledger entry failed: %w", err)
 		}
 	}
 
 	return &ledgerdomain.Transaction{
-		ID:              insertTxn.ID.String(),
+		ID:              insertTxn.ID,
 		IdempotencyKey:  insertTxn.IdempotencyKey,
 		TransactionType: ledgerdomain.TransactionType(insertTxn.TransactionType),
 		AggregateType:   insertTxn.AggregateType,
-		AggregateID:     txn.AggregateID,
+		AggregateID:     insertTxn.AggregateID.String(),
 		Description:     insertTxn.Description,
-		Entries:         txn.Entries,
 	}, nil
 }
 
@@ -326,10 +326,11 @@ func (r *LedgerRepo) GetTransactionByIdempotencyKey(ctx context.Context, idempot
 		return nil, err
 	}
 	return &ledgerdomain.Transaction{
-		ID:              row.ID.String(),
+		ID:              row.ID,
 		IdempotencyKey:  row.IdempotencyKey,
 		TransactionType: ledgerdomain.TransactionType(row.TransactionType),
 		AggregateType:   row.AggregateType,
+		AggregateID:     row.AggregateID.String(),
 		Description:     row.Description,
 	}, nil
 }

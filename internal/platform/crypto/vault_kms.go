@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/nexusglobal/mamr/internal/platform/httpx"
 )
 
 type VaultKMS struct {
@@ -37,11 +39,14 @@ func NewVaultKMS(cfg VaultKMSConfig) *VaultKMS {
 		cfg.Timeout = 10 * time.Second
 	}
 	return &VaultKMS{
-		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
-		httpClient: &http.Client{Timeout: cfg.Timeout},
-		token:      cfg.Token,
-		mountPath:  cfg.MountPath,
-		keyName:    cfg.KeyName,
+		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
+		httpClient: &http.Client{
+			Transport: httpx.DefaultTransport,
+			Timeout:   cfg.Timeout,
+		},
+		token:     cfg.Token,
+		mountPath: cfg.MountPath,
+		keyName:   cfg.KeyName,
 	}
 }
 

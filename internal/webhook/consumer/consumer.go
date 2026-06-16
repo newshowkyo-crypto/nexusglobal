@@ -389,25 +389,13 @@ func (c *Consumer) postFinancialEntry(
 		return fmt.Errorf("no treasury ledger for merchant %s currency %s", merchantID, currency)
 	}
 
-	debitAccID, err := c.ledgerRepo.GetOrCreateAccount(ctx, tx, merchantID, debitAccountType, currency)
-	if err != nil {
-		return fmt.Errorf("get debit account: %w", err)
-	}
-	creditAccID, err := c.ledgerRepo.GetOrCreateAccount(ctx, tx, merchantID, creditAccountType, currency)
-	if err != nil {
-		return fmt.Errorf("get credit account: %w", err)
-	}
-
 	_, err = c.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 		IdempotencyKey:  idempotencyKey,
 		TransactionType: ledgerdomain.TransactionType(eventType),
 		AggregateType:   "merchant",
 		AggregateID:     merchantID.String(),
 		Description:     fmt.Sprintf("Webhook %s %s %s", eventType, amount.String(), currency),
-		Entries: []ledgerdomain.Entry{
-			{AccountID: debitAccID.String(), Direction: ledgerdomain.DirectionDebit, Amount: amount},
-			{AccountID: creditAccID.String(), Direction: ledgerdomain.DirectionCredit, Amount: amount},
-		},
+		Amount:          amount,
 	})
 	if err != nil {
 		return fmt.Errorf("ledger post: %w", err)

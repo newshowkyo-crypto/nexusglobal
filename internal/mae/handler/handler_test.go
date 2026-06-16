@@ -37,7 +37,7 @@ func TestCreate_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestUpdate_Success(t *testing.T) {
@@ -48,7 +48,7 @@ func TestUpdate_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestRotateSecret_Success(t *testing.T) {
@@ -59,7 +59,7 @@ func TestRotateSecret_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestChangeStatus_Success(t *testing.T) {
@@ -71,7 +71,7 @@ func TestChangeStatus_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestGetMetrics_Success(t *testing.T) {

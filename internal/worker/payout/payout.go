@@ -21,22 +21,25 @@ import (
 	"github.com/nexusglobal/mamr/pkg/external/lp"
 
 	ledgerdomain "github.com/nexusglobal/mamr/internal/ledger/domain"
+	"github.com/nexusglobal/mamr/internal/ledger/fee"
 )
 
 type Worker struct {
 	repo       *repository.Repository
 	ledgerRepo *repository.LedgerRepo
 	lpCli      lp.Client
+	feeService fee.FeeServiceInterface
 	txm        *postgres.TxManager
 	pool       *pgxpool.Pool
 	logger     *slog.Logger
 }
 
-func New(repo *repository.Repository, ledgerRepo *repository.LedgerRepo, lpCli lp.Client, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger) *Worker {
+func New(repo *repository.Repository, ledgerRepo *repository.LedgerRepo, lpCli lp.Client, feeService fee.FeeServiceInterface, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger) *Worker {
 	return &Worker{
 		repo:       repo,
 		ledgerRepo: ledgerRepo,
 		lpCli:      lpCli,
+		feeService: feeService,
 		txm:        txm,
 		pool:       pool,
 		logger:     logger,
@@ -181,25 +184,13 @@ func (w *Worker) Confirm(ctx context.Context, payoutID uuid.UUID, providerRef st
 			return fmt.Errorf("confirm: no treasury ledger for merchant %s currency %s", payoutReq.MerchantID, payoutReq.FiatCurrency)
 		}
 
-		frozenAccID, err := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "FROZEN_PAYOUT", payoutReq.FiatCurrency)
-		if err != nil {
-			return fmt.Errorf("confirm: get frozen account: %w", err)
-		}
-		externalAccID, err := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "EXTERNAL_PAYOUT_SETTLEMENT", payoutReq.FiatCurrency)
-		if err != nil {
-			return fmt.Errorf("confirm: get external account: %w", err)
-		}
-
 		_, err = w.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  idempotencyKey,
-			TransactionType: ledgerdomain.TxnTypePayoutConfirm,
+			TransactionType: ledgerdomain.TransactionType("PAYOUT_CONFIRM"),
 			AggregateType:   "payout_request",
 			AggregateID:     payoutID.String(),
 			Description:     fmt.Sprintf("Payout confirm %s %s", amount.String(), payoutReq.FiatCurrency),
-			Entries: []ledgerdomain.Entry{
-				{AccountID: frozenAccID.String(), Direction: ledgerdomain.DirectionDebit, Amount: amount},
-				{AccountID: externalAccID.String(), Direction: ledgerdomain.DirectionCredit, Amount: amount},
-			},
+			Amount:          amount,
 		})
 		if err != nil {
 			return fmt.Errorf("confirm: ledger post: %w", err)
@@ -215,8 +206,46 @@ func (w *Worker) Confirm(ctx context.Context, payoutID uuid.UUID, providerRef st
 			return fmt.Errorf("confirm: update balance: %w", err)
 		}
 
-		return w.repo.UpdatePayoutRequestStatus(ctx, tx,
-			payoutID, string(domain.StatusConfirmed), payoutReq.Version)
+		if err := w.repo.UpdatePayoutRequestStatus(ctx, tx,
+			payoutID, string(domain.StatusConfirmed), payoutReq.Version); err != nil {
+			return fmt.Errorf("confirm: update status: %w", err)
+		}
+
+		// 记录代付费用（BANK_FEE 和 NETWORK_FEE）
+		if w.feeService != nil {
+			feeDetails := []fee.FeeDetail{}
+
+			// 模拟从 provider response 或配置中获取费用信息
+			// 在实际场景中，这些费用应从 LP 返回的结果中提取
+			bankFeeAmount := int64(100)   // 模拟银行费用（最小单位）
+			networkFeeAmount := int64(50) // 模拟网络费用（最小单位）
+
+			if bankFeeAmount > 0 {
+				feeDetails = append(feeDetails, fee.FeeDetail{
+					FeeType:    fee.FeeTypeBank,
+					Amount:     bankFeeAmount,
+					SourceData: map[string]interface{}{"payout_id": payoutID.String(), "provider_ref": providerRef, "fee_type": "bank_fee"},
+				})
+			}
+
+			if networkFeeAmount > 0 {
+				feeDetails = append(feeDetails, fee.FeeDetail{
+					FeeType:    fee.FeeTypeNetwork,
+					Amount:     networkFeeAmount,
+					SourceData: map[string]interface{}{"payout_id": payoutID.String(), "provider_ref": providerRef, "fee_type": "network_fee", "network": payoutReq.TargetNetwork},
+				})
+			}
+
+			if len(feeDetails) > 0 {
+				go func() {
+					if err := w.feeService.AllocateTransactionFees(context.Background(), payoutID, payoutReq.MerchantID, payoutReq.FiatCurrency, feeDetails); err != nil {
+						w.logger.Error("failed to allocate payout fees", "payout_id", payoutID, "error", err)
+					}
+				}()
+			}
+		}
+
+		return nil
 	})
 }
 
@@ -270,25 +299,13 @@ func (w *Worker) Release(ctx context.Context, payoutID uuid.UUID) error {
 			return fmt.Errorf("release: no treasury ledger for merchant %s currency %s", payoutReq.MerchantID, payoutReq.FiatCurrency)
 		}
 
-		frozenAccID, err := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "FROZEN_PAYOUT", payoutReq.FiatCurrency)
-		if err != nil {
-			return fmt.Errorf("release: get frozen account: %w", err)
-		}
-		settledAccID, err := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "SETTLED", payoutReq.FiatCurrency)
-		if err != nil {
-			return fmt.Errorf("release: get settled account: %w", err)
-		}
-
 		_, err = w.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  idempotencyKey,
-			TransactionType: ledgerdomain.TxnTypePayoutRelease,
+			TransactionType: ledgerdomain.TransactionType("PAYOUT_RELEASE"),
 			AggregateType:   "payout_request",
 			AggregateID:     payoutID.String(),
 			Description:     fmt.Sprintf("Payout release %s %s", amount.String(), payoutReq.FiatCurrency),
-			Entries: []ledgerdomain.Entry{
-				{AccountID: frozenAccID.String(), Direction: ledgerdomain.DirectionDebit, Amount: amount},
-				{AccountID: settledAccID.String(), Direction: ledgerdomain.DirectionCredit, Amount: amount},
-			},
+			Amount:          amount,
 		})
 		if err != nil {
 			return fmt.Errorf("release: ledger post: %w", err)

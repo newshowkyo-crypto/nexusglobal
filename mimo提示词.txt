@@ -1,51 +1,282 @@
- 你是本仓库（F:\NexusGlobal，Go 模块 github.com/nexusglobal/mamr）的开发代理。
+你现在接手 NexusGlobal MAMR-System 的 V2.0 合规生产加固任务。
 
-  G1-G10 + C1 已修复并经独立复验通过（勿动勿回退）。现在做预上线最后的开发收尾，
-  清单在根目录 FIX_ORDER_R3.md，背景在 STATUS.md。请先读这两个文件再开工。
+请先阅读：
+- PROJECT.md
+- COMPLIANT_REFACTOR_BLUEPRINT_V2.md
+- PRD.md
+- TDD.md
+- CONSTRAINTS.md
+- CODING_STANDARDS.md
 
-  做 FIX_ORDER_R3.md 的三项：
-  - R3-1 托管收银台 HandleCharge 真实化 + OrderProvider 接线（当前是写死 success、provider 传 nil）
-  - R3-2 Single-Use Token 存储加 Redis 实现 + 按配置切换（当前只有内存版）
-  - R3-3 运营后台 7 张 B 类表的数据录入（当前后台全只读，无写端点）
+目标不是做规避型系统，而是做合法、透明、可审计的多租户支付、风控、财资调度中台。
 
-  铁律（违反即视为本轮失败）：
-  1. 不信报告只信代码：先读真实代码确认现状，别照搬行号（会漂移），以符号/上下文为准。
-  2. 禁止 stub 糊弄：禁写死返回值（如 HandleCharge 现在的 {"success":true}）、空数组冒充查询、
-     t.Skip 跳过失败、_ = x 丢参数；后台表单必须真实写库，不许只做界面不接库。
-  3. 资金/合规红线：账务只走既有 webhook captured→核心消费者入账路径，HandleCharge 不直接写账本；
-     绝不持久化或日志记录 PAN/CVV/明文卡号；DB 事务内禁外部 I/O；金额禁 float，
-     写库一律 money.DecimalToNumeric，禁手写 decimal→numeric 转换。
-  4. 外部依赖（MAE 扣款、Redis）经工厂按 *_MODE / 配置切换：mock 实现要能模拟
-     成功/显式失败/超时三态（超时不臆断成功）；real 实现路径完整可发请求。
-     token 单次兑换要并发安全（SETNX/Lua 保证"检查+置已用"原子）。
-  5. 禁止 sqlc generate（生成码与 sqlc.yaml 的 numeric→decimal override 不一致会全仓乱改）；
-     要加写库查询请定向手改生成码，字段顺序对齐 models.go，改完确认 SELECT/Scan 不错位。
-  6. 敏感字段（MAE api_key、webhook secret、出金地址）落库必须加密。
-  7. 每项必须有真实测试，证明真实行为而非状态字符串：
-     - HandleCharge：有效 token+mock 成功→扣款成功；mock 失败/超时→对应错误无假成功；
-       过期/重复 token→拒绝；断言无处持久化/打印卡号。
-     - Redis token store：单次使用后再兑换被拒、TTL 过期失效、并发只成功一次；
-       与内存版跑同一组契约测试都过。
-     - 后台录入：经新端点建记录后能被对应 List/Get 读出、加密字段落库为密文、非法输入被拒。
-  8. 同一问题失败 2 次，停止打补丁，定位根因换方案，记录到 MEMORY.md。
+重要边界：
+1. 不实现无履约、不对版收单、隐藏真实交易、误导消费者、规避银行/卡组织/收单机构/LP/交易所/监管审查的能力。
+2. 不实现前端混淆来规避风控。SDK 只能做透明接入、展示金额/商户/订单/退款政策。
+3. 不实现争议资金、未履约资金、reserve 资金、manual_review 资金的自动上链或自动转移。
+4. 所有外部资金动作必须走 Outbox / Worker / Saga。
+5. DB 本地事务内禁止 LP / Bank / Exchange / MAE / HTTP 外部网络 I/O。
+6. 敏感密钥必须加密，不得存 JSONB 明文。
+7. Timeout != Failed，必须进入 UnknownExternalState，只能查询最终态，不盲目重复提交资金动作。
+8. 不允许 stub、假成功、空实现冒充完成。
 
-  不要做、也不要伪造这两项纯运维动作（需真实凭证/基础设施，上线时人工做）：
-  ①填真实凭证 + 切 *_MODE=real；②生产部署与 GO_LIVE §9 切换后验证。
-  你只需保证代码路径完整、切真实仅需改配置；禁止把假凭证写进仓库冒充完成。
+请按以下顺序执行。每次只做一个任务包，做完测试通过后再进入下一个。
 
-  完成后跑完整门禁并贴完整输出：
-     go build ./... ; go vet ./... ; gofmt -l . ; go test ./... -count=1
-     （禁 -short/挑包/t.Skip 跳过失败；docker 集成要真跑）
-  internal/platform/stream 偶发 "rootless Docker ... failed to create Docker provider" 是
-  Windows testcontainers 抖动，重跑确认通过并说明，不得当作通过略过。
+============================================================
+任务包 D：Dispute Ledger / Refund / Chargeback
+============================================================
 
-  完成后如实更新 STATUS.md §4，汇总你改了什么+门禁结果+完整测试输出，等待审计复验。
-  不要自称"全部完成/可上线"。
+目标：
+补齐退款、拒付、拒付反转的逆向账务与平台风险准备金。
 
-  ---
-  提醒一点：FIX_ORDER_R3 里我把「填真实凭证切 real」「生产部署+GO_LIVE 验证」明确划在 mimo 范围外——这两项需要真实的
-  LP/Bank/MAE/Vault 凭证和生产环境，AI 代理做不了，只能由你在上线时按 GO_LIVE.md 人工执行。mimo
-  的活儿是把代码路径做到「切真实只改配置」。
+涉及文件建议：
+- migrations/
+- internal/dispute/domain/
+- internal/dispute/repository/
+- internal/dispute/service/
+- internal/dispute/handler/
+- internal/ledger/
+- internal/payout/ 或 internal/webhook/consumer/ 中涉及逆向事件入口的部分
 
-  mimo 交回来后我照旧复验（读码 + 实跑 + 必要的反向验证，重点查 HandleCharge 是否真扣款无假成功、卡号不落库、token
-  并发安全、后台是否真写库）。
+要求：
+1. 新增 payment_dispute 表。
+2. 新增 platform_dispute_reserve_ledger 表。
+3. 新增必要的 merchant_negative_balance 或等价追缴记录能力。
+4. 新增 ledger transaction types：
+   - ORDER_REFUND
+   - CHARGEBACK_RECEIVED
+   - CHARGEBACK_REVERSED
+   - CHARGEBACK_FEE
+5. 实现 RefundConfirmed 入账：
+   - Dr Merchant Settled
+   - Cr Acquirer Receivable / Bank Clearing
+   - merchant settled 正确减少
+6. 实现 ChargebackReceived 入账：
+   - dispute amount 从 merchant settled 扣减
+   - dispute amount 进入 platform dispute reserve
+   - chargeback fee 单独进入 fee account
+7. 实现 ChargebackReversed 入账：
+   - 从 platform dispute reserve 转回 merchant settled
+8. 如果 settled 不足：
+   - settled 扣到 0
+   - 差额进入 negative balance / receivable
+   - merchant 进入 RiskHold 或等价状态
+9. 所有写操作必须幂等。
+10. 所有账务更新必须在一个 DB 本地事务内完成。
+11. 不允许 webhook handler 直接改余额；必须进入 service/consumer 事务路径。
+
+验收测试：
+- refund 后 merchant settled 正确减少
+- chargeback 后 reserve 正确增加
+- chargeback fee 正确入 fee account
+- reversed 后 merchant settled 恢复
+- 重复 webhook / 重复 idempotency key 不重复入账
+- settled 不足进入 negative balance / RiskHold
+- 借贷分录恒平衡
+
+============================================================
+任务包 B：Anti-Carding Redis Sliding Window Gateway
+============================================================
+
+目标：
+在 /public/v1/order-intents 前增加统一测卡/异常流量拦截。
+
+涉及文件建议：
+- internal/risk/carding/
+- internal/platform/redis/
+- internal/platform/httpx/
+- cmd/api/main.go
+- migrations/ 可新增 risk_event 表
+
+要求：
+1. 新增 RiskDecision：
+   - Allow
+   - Block
+   - Challenge
+   - Cooldown
+2. 支持维度：
+   - buyer_ip
+   - app_id
+   - tenant_id
+   - merchant_id
+   - card_bin_hash
+   - device_hash
+3. 使用 Redis Lua 原子 INCR + EXPIRE。
+4. 支持 60s / 5m / 1h 窗口。
+5. 命中阈值返回 429 或 403。
+6. 命中阈值后不得调用后方 acquirer。
+7. 写 risk_event 审计表。
+8. 不存完整卡号，不存 CVV。BIN 必须 hash 或只保留统计所需最小信息。
+9. Redis 不可用时：
+   - local/mock 可配置 fail-open
+   - production 默认 fail-closed
+
+验收测试：
+- 同 IP 60s 超阈值 -> Block
+- 同 BIN 多卡失败 -> Block
+- 同 App_ID 短时间高失败率 -> Block
+- 正常低频请求 -> Allow
+- 命中 Block 时确认没有调用 mock acquirer
+- Redis Lua 脚本并发下计数正确
+
+============================================================
+任务包 A：Channel Registry Object Pool
+============================================================
+
+目标：
+实现动态通道客户端单例对象池，消除交易热路径查库、解密、创建 client。
+
+涉及文件建议：
+- migrations/
+- internal/acquirer/registry/
+- internal/acquirer/factory/
+- internal/acquirer/adapter/
+- internal/platform/config/
+- cmd/api/main.go
+- cmd/worker/main.go
+
+要求：
+1. 新增 payment_provider 表。
+2. 新增 tenant_acquirer_channel 表。
+3. 新增 provider_credential_vault 表。
+4. provider_config 只存非敏感 JSONB 参数。
+5. API key、secret、private key、webhook secret 必须进入 provider_credential_vault 加密存储。
+6. 定义 AcquirerClient interface，至少包含：
+   - Authorize
+   - Capture
+   - Refund
+   - QueryPayment
+   - VerifyWebhook
+7. 实现 MockAcquirer adapter。
+8. 实现 ChannelRegistry：
+   - Get(channelID)
+   - LoadAll(ctx)
+   - Reload(channelID)
+   - Disable(channelID)
+9. 使用 RWMutex、sync.Map 或 atomic snapshot。交易热路径不得访问 PG/KMS。
+10. Redis Pub/Sub 订阅 channel.config.updated 事件并触发 Reload。
+11. Reload 成功后原子替换 ClientBundle。
+12. Reload 失败必须 fail-closed 或 stale-but-serving，并输出日志和指标。
+13. 禁用 channel 后 registry 不能继续返回可用 client。
+
+验收测试：
+- go test ./internal/acquirer/... -count=1
+- 并发 1000 goroutine Get 不 race
+- 修改 channel version 后 Reload 替换 bundle
+- 禁用 channel 后 Get 返回 unavailable
+- 交易热路径测试中不得查 PG/KMS，可用 mock store 断言调用次数为 0
+
+============================================================
+任务包 E：Public Site API 与透明 SDK 边界
+============================================================
+
+目标：
+实现合规透明的站点接入 API，不实现规避型混淆。
+
+涉及文件建议：
+- migrations/
+- internal/siteapp/
+- internal/publicapi/
+- web/sdk/
+- cmd/api/main.go
+
+要求：
+1. 新增 tenant_site_application 表。
+2. 新增 site_order_intent 表。
+3. 实现 X-App-ID / X-Timestamp / X-Nonce / X-Signature 中间件。
+4. App_Secret 只允许服务端使用，不能进入 JS。
+5. /public/v1/order-intents 创建订单意图。
+6. 返回 checkout_url。
+7. SDK 只负责加载 checkout、展示金额/商户/订单/退款政策，不隐藏交易实质。
+8. 支持 allowed_origins。
+9. 支持 nonce 防重放。
+10. 所有创建接口支持 Idempotency-Key 和 payload_hash 冲突检测。
+
+验收测试：
+- 签名正确 -> 创建 intent
+- 签名错误 -> 401
+- timestamp 过期 -> 401
+- nonce 重放 -> 409
+- origin 不在 allowlist -> 403
+- SDK 不包含 app_secret
+- 同 Idempotency-Key 不同 payload -> 409
+
+============================================================
+任务包 C：Cashout Conversion Slippage Guard
+============================================================
+
+目标：
+为自动化换汇增加 order book 检查、滑点保护、断点续传。
+
+注意：
+此任务必须最后做，因为它依赖账务、风控、对账基础。
+
+涉及文件建议：
+- migrations/
+- internal/treasury/cashout/
+- internal/worker/cashout/
+- pkg/external/exchange/
+
+要求：
+1. 新增 treasury_cashout_policy 表。
+2. 新增 treasury_cashout_request 表。
+3. 新增 treasury_cashout_step 表。
+4. 定义 ExchangeClient：
+   - GetOrderBook
+   - PlaceLimitOrder
+   - QueryOrder
+   - Withdraw
+5. Conversion Worker 执行前必须读取 order book。
+6. 默认 max_allowed_slippage_bps = 20，也就是最大 0.2%。
+7. 超滑点 -> ApprovalRequired，不下单。
+8. timeout -> UnknownExternalState。
+9. partial fill -> PartiallyFilled，并记录 actual_target_amount。
+10. 所有外部调用必须在 DB 事务外。
+11. 有 provider_ref 时恢复只能 Query，不得重复 PlaceOrder。
+12. 不可动用以下资金：
+    - pending balance
+    - reserve balance
+    - dispute hold
+    - frozen payout balance
+    - manual_review 资金
+
+验收测试：
+- order book 深度不足 -> ApprovalRequired
+- 滑点 <= 20bps -> 可提交 limit order
+- timeout 不重复下单，只 query
+- partial fill 不丢失实际成交金额
+- manual_review / reserve / dispute hold 资金不可进入 cashout
+
+============================================================
+每个任务包完成后必须运行
+============================================================
+
+至少运行：
+- go build ./...
+- go vet ./...
+- gofmt -l .
+- go test ./... -short -count=1
+
+涉及 DB / Redis / 集成路径时，额外运行相关集成测试：
+- go test ./test/integration/... -count=1
+
+如果 Windows testcontainers 报 rootless Docker is not supported：
+1. 明确列出失败包和失败原因；
+2. 单独跑本任务相关单测；
+3. 不允许把真实代码失败伪装成环境失败。
+
+============================================================
+最终回复格式
+============================================================
+
+每完成一个任务包，按下面格式回复：
+
+1. 任务包名称
+2. 修改文件列表
+3. 表结构 / migration 摘要
+4. 新增接口 / service / worker 摘要
+5. 资金与风控红线自查
+6. 测试命令完整结果
+7. 未完成项和风险
+
+不要一次性大改所有任务包。先做任务包 D，完成并通过测试后再继续任务包 B。

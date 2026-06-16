@@ -21,6 +21,7 @@ type Repository interface {
 	ListConfigs(ctx context.Context) ([]db.MaeConfiguration, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status, reason string, version int32, lockUntil *time.Time) error
 	RotateSecret(ctx context.Context, id uuid.UUID, apiKeyCiphertext, webhookSecretCiphertext []byte, version int32) error
+	UpdateConfig(ctx context.Context, params db.UpdateMAEConfigParams) error
 }
 
 // TestingFailCounter 持久化 Testing 态连续灰度失败次数（Redis）。
@@ -145,6 +146,107 @@ func (s *Service) ChangeStatus(ctx context.Context, cmd ChangeStatusCmd) error {
 
 func (s *Service) GetConfig(ctx context.Context, maeID string) (*db.MaeConfiguration, error) {
 	return s.repo.GetConfigByMAEID(ctx, maeID)
+}
+
+type UpdateMAECmd struct {
+	MAEID                    string
+	DisplayName              string
+	MAEType                  string
+	TenantScope              []byte
+	Jurisdiction             string
+	SupportedCurrencies      []byte
+	APIBaseURL               string
+	WebhookProxyURL          string
+	RiskLabel                string
+	DailyVmaxMinor           int64
+	MonthlyVmaxMinor         int64
+	CmaxBps                  int32
+	CardTestingLimit         int32
+	RoutingWeight            int32
+	CooldownMinutes          int32
+	TestingTrafficBps        int32
+	TestingMinTxnCount       int32
+	TestingMinSuccessRateBps int32
+	TestingMaxP95LatencyMs   int32
+	Version                  int32
+}
+
+func (s *Service) Update(ctx context.Context, cmd UpdateMAECmd) error {
+	config, err := s.repo.GetConfigByMAEID(ctx, cmd.MAEID)
+	if err != nil {
+		return err
+	}
+	if config == nil {
+		return apperr.ErrNotFound.WithMessage("MAE not found: " + cmd.MAEID)
+	}
+
+	if config.Version != cmd.Version {
+		return apperr.ErrVersionConflict.WithMessage("version conflict")
+	}
+
+	return s.repo.UpdateConfig(ctx, db.UpdateMAEConfigParams{
+		ID:                       config.ID,
+		DisplayName:              cmd.DisplayName,
+		MaeType:                  cmd.MAEType,
+		TenantScope:              cmd.TenantScope,
+		Jurisdiction:             cmd.Jurisdiction,
+		SupportedCurrencies:      cmd.SupportedCurrencies,
+		ApiBaseUrl:               cmd.APIBaseURL,
+		WebhookProxyUrl:          cmd.WebhookProxyURL,
+		RiskLabel:                cmd.RiskLabel,
+		DailyVmaxMinor:           cmd.DailyVmaxMinor,
+		MonthlyVmaxMinor:         cmd.MonthlyVmaxMinor,
+		CmaxBps:                  cmd.CmaxBps,
+		CardTestingLimit:         cmd.CardTestingLimit,
+		RoutingWeight:            cmd.RoutingWeight,
+		CooldownMinutes:          cmd.CooldownMinutes,
+		TestingTrafficBps:        cmd.TestingTrafficBps,
+		TestingMinTxnCount:       cmd.TestingMinTxnCount,
+		TestingMinSuccessRateBps: cmd.TestingMinSuccessRateBps,
+		TestingMaxP95LatencyMs:   cmd.TestingMaxP95LatencyMs,
+		Version:                  cmd.Version,
+	})
+}
+
+type RotateSecretCmd struct {
+	MAEID         string
+	APIKey        string
+	WebhookSecret string
+	Version       int32
+}
+
+func (s *Service) RotateSecret(ctx context.Context, cmd RotateSecretCmd) error {
+	config, err := s.repo.GetConfigByMAEID(ctx, cmd.MAEID)
+	if err != nil {
+		return err
+	}
+	if config == nil {
+		return apperr.ErrNotFound.WithMessage("MAE not found: " + cmd.MAEID)
+	}
+
+	if config.Version != cmd.Version {
+		return apperr.ErrVersionConflict.WithMessage("version conflict")
+	}
+
+	apiKeyEnc, err := s.encryptor.Encrypt(ctx, []byte(cmd.APIKey), crypto.Meta{
+		TenantID:  cmd.MAEID,
+		RecordID:  "mae",
+		FieldName: "api_key",
+	})
+	if err != nil {
+		return err
+	}
+
+	webhookSecretEnc, err := s.encryptor.Encrypt(ctx, []byte(cmd.WebhookSecret), crypto.Meta{
+		TenantID:  cmd.MAEID,
+		RecordID:  "mae",
+		FieldName: "webhook_secret",
+	})
+	if err != nil {
+		return err
+	}
+
+	return s.repo.RotateSecret(ctx, config.ID, apiKeyEnc, webhookSecretEnc, cmd.Version)
 }
 
 func (s *Service) ListConfigs(ctx context.Context) ([]db.MaeConfiguration, error) {

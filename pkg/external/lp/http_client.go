@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/nexusglobal/mamr/internal/platform/httpx"
 )
 
 type HTTPClient struct {
@@ -19,10 +21,14 @@ type HTTPClient struct {
 }
 
 func NewHTTPClient(baseURL string, apiKey string, timeout time.Duration) *HTTPClient {
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
 	return &HTTPClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Transport: httpx.DefaultTransport,
+			Timeout:   timeout,
 		},
 		apiKey: apiKey,
 	}

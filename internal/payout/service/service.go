@@ -113,15 +113,6 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 			return fmt.Errorf("update balance: %w", err)
 		}
 
-		settledAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "SETTLED", cmd.FiatCurrency)
-		if err != nil {
-			return fmt.Errorf("get settled account: %w", err)
-		}
-		frozenAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "FROZEN_PAYOUT", cmd.FiatCurrency)
-		if err != nil {
-			return fmt.Errorf("get frozen account: %w", err)
-		}
-
 		payoutReq, err := s.repo.InsertPayoutRequest(ctx, tx, db.InsertPayoutRequestParams{
 			MerchantID:      cmd.MerchantID,
 			PayoutAddressID: cmd.PayoutAddressID,
@@ -136,15 +127,26 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 			return fmt.Errorf("insert payout request: %w", err)
 		}
 
+		// 获取或创建 ledger accounts
+		settledAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "SETTLED", cmd.FiatCurrency)
+		if err != nil {
+			return fmt.Errorf("get settled account: %w", err)
+		}
+		frozenAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "FROZEN_PAYOUT", cmd.FiatCurrency)
+		if err != nil {
+			return fmt.Errorf("get frozen account: %w", err)
+		}
+
 		_, err = s.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  "payout_freeze:" + payoutReq.ID.String(),
-			TransactionType: ledgerdomain.TxnTypePayoutFreeze,
+			TransactionType: ledgerdomain.TransactionType("PAYOUT_FREEZE"),
 			AggregateType:   "payout_request",
 			AggregateID:     payoutReq.ID.String(),
 			Description:     fmt.Sprintf("Payout freeze %s %s", cmd.Amount.String(), cmd.FiatCurrency),
+			Amount:          cmd.Amount,
 			Entries: []ledgerdomain.Entry{
-				{AccountID: settledAccID.String(), Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
-				{AccountID: frozenAccID.String(), Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
+				{AccountID: settledAccID, Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
+				{AccountID: frozenAccID, Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
 			},
 		})
 		if err != nil {
@@ -347,25 +349,13 @@ func (s *Service) ReserveHold(ctx context.Context, cmd ReserveHoldCmd) (ReserveH
 			return apperr.ErrInsufficientBalance.WithMessage("insufficient available for reserve hold")
 		}
 
-		settledAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "SETTLED", cmd.FiatCurrency)
-		if err != nil {
-			return err
-		}
-		reserveAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "RESERVE", cmd.FiatCurrency)
-		if err != nil {
-			return err
-		}
-
 		_, err = s.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  cmd.IdempotencyKey,
-			TransactionType: ledgerdomain.TxnTypeReserveHold,
+			TransactionType: ledgerdomain.TransactionType("RESERVE_HOLD"),
 			AggregateType:   "merchant",
 			AggregateID:     cmd.MerchantID.String(),
 			Description:     fmt.Sprintf("Reserve hold %s %s", cmd.Amount.String(), cmd.FiatCurrency),
-			Entries: []ledgerdomain.Entry{
-				{AccountID: settledAccID.String(), Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
-				{AccountID: reserveAccID.String(), Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
-			},
+			Amount:          cmd.Amount,
 		})
 		if err != nil {
 			return err
@@ -412,25 +402,13 @@ func (s *Service) ReserveRelease(ctx context.Context, cmd ReserveReleaseCmd) (Re
 			return apperr.ErrInsufficientBalance.WithMessage("reserve balance insufficient for release")
 		}
 
-		reserveAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "RESERVE", cmd.FiatCurrency)
-		if err != nil {
-			return err
-		}
-		settledAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "SETTLED", cmd.FiatCurrency)
-		if err != nil {
-			return err
-		}
-
 		_, err = s.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  cmd.IdempotencyKey,
-			TransactionType: ledgerdomain.TxnTypeReserveRelease,
+			TransactionType: ledgerdomain.TransactionType("RESERVE_RELEASE"),
 			AggregateType:   "merchant",
 			AggregateID:     cmd.MerchantID.String(),
 			Description:     fmt.Sprintf("Reserve release %s %s", cmd.Amount.String(), cmd.FiatCurrency),
-			Entries: []ledgerdomain.Entry{
-				{AccountID: reserveAccID.String(), Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
-				{AccountID: settledAccID.String(), Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
-			},
+			Amount:          cmd.Amount.Neg(), // 释放是负数
 		})
 		if err != nil {
 			return err

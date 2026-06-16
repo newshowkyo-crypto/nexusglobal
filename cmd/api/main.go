@@ -15,10 +15,18 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/nexusglobal/mamr/internal/acquirer"
+	acquirerhandler "github.com/nexusglobal/mamr/internal/acquirer/handler"
+	"github.com/nexusglobal/mamr/internal/acquirer/registry"
+	"github.com/nexusglobal/mamr/internal/acquirer/repository"
 	"github.com/nexusglobal/mamr/internal/admin"
 	"github.com/nexusglobal/mamr/internal/checkout"
-	"github.com/nexusglobal/mamr/internal/ledger/handler"
+	disputehandler "github.com/nexusglobal/mamr/internal/dispute/handler"
+	disputerepo "github.com/nexusglobal/mamr/internal/dispute/repository"
+	disputeservice "github.com/nexusglobal/mamr/internal/dispute/service"
+	ledgerhandler "github.com/nexusglobal/mamr/internal/ledger/handler"
 	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
+	ledgerservice "github.com/nexusglobal/mamr/internal/ledger/service"
 	maehandler "github.com/nexusglobal/mamr/internal/mae/handler"
 	maemetric "github.com/nexusglobal/mamr/internal/mae/metric"
 	maerepo "github.com/nexusglobal/mamr/internal/mae/repository"
@@ -26,6 +34,7 @@ import (
 	payouthandler "github.com/nexusglobal/mamr/internal/payout/handler"
 	payoutrepo "github.com/nexusglobal/mamr/internal/payout/repository"
 	payoutservice "github.com/nexusglobal/mamr/internal/payout/service"
+	"github.com/nexusglobal/mamr/internal/pipeline"
 	"github.com/nexusglobal/mamr/internal/platform/config"
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
 	"github.com/nexusglobal/mamr/internal/platform/factories"
@@ -34,6 +43,7 @@ import (
 	"github.com/nexusglobal/mamr/internal/platform/otel"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
 	"github.com/nexusglobal/mamr/internal/platform/stream"
+	riskcarding "github.com/nexusglobal/mamr/internal/risk/carding"
 	"github.com/nexusglobal/mamr/internal/token"
 	treasuryhandler "github.com/nexusglobal/mamr/internal/treasury/handler"
 	treasuryrepo "github.com/nexusglobal/mamr/internal/treasury/repository"
@@ -95,13 +105,18 @@ func main() {
 	}
 
 	queries := db.New(pool)
-	ledgerH := handler.New(queries)
+	ledgerH := ledgerhandler.New(queries)
 
 	payoutRepo := payoutrepo.New(pool)
 	ledgerRepo := payoutrepo.NewLedgerRepo(pool)
 	txm := postgres.NewTxManager(pool)
 	payoutSvc := payoutservice.New(payoutRepo, ledgerRepo, enc, txm, pool)
 	payoutH := payouthandler.New(payoutSvc)
+
+	ledgerSvc := ledgerservice.New(ledgerRepo, txm, pool)
+	disputeRepo := disputerepo.New(pool)
+	disputeSvc := disputeservice.New(disputeRepo, ledgerSvc, txm)
+	disputeH := disputehandler.New(disputeSvc)
 
 	maeRepo := maerepo.New(pool)
 	maeSvc := maeservice.New(maeRepo, enc, pool)
@@ -129,6 +144,21 @@ func main() {
 	treasurySvc := treasuryservice.New(treasuryRepoInst, deps.Bank, txm, pool, delayQ, log)
 	treasuryH := treasuryhandler.New(treasurySvc)
 
+	// 任务包 B: Anti-Carding Redis Sliding Window Gateway
+	var riskGateway *riskcarding.Gateway
+	var riskSvc *riskcarding.Service
+	var riskH *riskcarding.Handler
+	if rdb != nil {
+		riskGateway = riskcarding.NewGateway(riskcarding.GatewayConfig{
+			RDB:      rdb,
+			Logger:   log,
+			FailOpen: cfg.AppEnv == "local" || cfg.AppEnv == "mock", // production 默认 fail-closed
+		})
+		riskRepo := riskcarding.NewRepository(pool)
+		riskSvc = riskcarding.NewService(riskGateway, riskRepo, pool, log)
+		riskH = riskcarding.NewHandler(riskSvc)
+	}
+
 	dbPing := func() error { return pool.Ping(context.Background()) }
 	redisPing := func() error {
 		if rdb == nil {
@@ -141,6 +171,8 @@ func main() {
 	r.Get("/readyz", httpx.ReadinessCheck(dbPing, redisPing))
 
 	adminH := admin.NewHandler(pool, enc)
+	v3ChannelsH := admin.NewV3ChannelsHandler(pool, rdb)
+	v3IssuingPoolsH := admin.NewV3IssuingPoolsHandler(pool, rdb)
 
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(httpx.AdminAuth(cfg.JWTSecret))
@@ -161,6 +193,7 @@ func main() {
 
 		// Outbox
 		r.Get("/outbox", adminH.ListOutbox)
+		r.Get("/outbox/{id}", adminH.GetOutbox)
 
 		// Treasury
 		r.Get("/calendars", adminH.ListCalendars)
@@ -177,6 +210,100 @@ func main() {
 
 		// Merchants
 		r.Get("/merchants", adminH.ListMerchants)
+
+		// Universal Adapter Registry API
+		r.Route("/adapter", func(r chi.Router) {
+			r.Get("/providers", adminH.ListAdapterProviders)
+			r.Post("/providers", adminH.CreateAdapterProvider)
+			r.Patch("/providers/{id}", adminH.UpdateAdapterProvider)
+			r.Delete("/providers/{id}", adminH.DeleteAdapterProvider)
+			r.Get("/channels", adminH.ListAdapterChannels)
+			r.Post("/channels", adminH.CreateAdapterChannel)
+			r.Patch("/channels/{id}", adminH.UpdateAdapterChannel)
+			r.Post("/channels/{id}/enable", adminH.EnableAdapterChannel)
+			r.Post("/channels/{id}/disable", adminH.DisableAdapterChannel)
+			r.Post("/channels/{id}/reload", adminH.ReloadAdapterChannel)
+		})
+
+		// Corporate Entity API
+		r.Route("/entities", func(r chi.Router) {
+			r.Get("/", adminH.ListEntities)
+			r.Post("/", adminH.CreateEntity)
+			r.Patch("/{id}", adminH.UpdateEntity)
+			r.Post("/{id}/risk-hold", adminH.SetEntityRiskHold)
+			r.Post("/{id}/enable", adminH.EnableEntity)
+		})
+
+		// Asset Bridge API
+		r.Route("/asset-bridge/profiles", func(r chi.Router) {
+			r.Get("/", adminH.ListBridgeProfiles)
+			r.Post("/", adminH.CreateBridgeProfile)
+			r.Patch("/{id}", adminH.UpdateBridgeProfile)
+			r.Post("/{id}/enable", adminH.EnableBridgeProfile)
+			r.Post("/{id}/disable", adminH.DisableBridgeProfile)
+		})
+
+		// Wallet Policy API
+		r.Route("/wallet-policies", func(r chi.Router) {
+			r.Get("/", adminH.ListWalletPolicies)
+			r.Post("/", adminH.CreateWalletPolicy)
+			r.Patch("/{id}", adminH.UpdateWalletPolicy)
+			r.Post("/{id}/enable", adminH.EnableWalletPolicy)
+			r.Post("/{id}/disable", adminH.DisableWalletPolicy)
+		})
+
+		// V3 合规升级 API
+		r.Route("/v3", func(r chi.Router) {
+			// 通道风控配置
+			r.Get("/channel-risk", adminH.ListChannelRiskConfigs)
+			r.Patch("/channel-risk/{id}", adminH.UpdateChannelRiskConfig)
+
+			// 商户风险配置
+			r.Get("/merchant-risk-profiles", adminH.ListMerchantRiskProfiles)
+			r.Post("/merchant-risk-profiles", adminH.CreateMerchantRiskProfile)
+
+			// 滚动准备金记录
+			r.Get("/rolling-reserves", adminH.ListRollingReserveEntries)
+
+			// 费用摊销记录
+			r.Get("/fee-allocations", adminH.ListFeeAllocations)
+
+			// 管道隔离组
+			r.Get("/isolation-groups", adminH.ListIsolationGroups)
+			r.Post("/isolation-groups", adminH.CreateIsolationGroup)
+			r.Post("/isolation-groups/{id}/freeze", adminH.FreezeIsolationGroup)
+			r.Post("/isolation-groups/{id}/unfreeze", adminH.UnfreezeIsolationGroup)
+
+			// RFI 合规资料包
+			r.Get("/rfi-documents", adminH.ListRFIDocuments)
+			r.Post("/rfi-documents/generate", adminH.GenerateRFIDocument)
+			r.Get("/rfi-documents/{id}", adminH.GetRFIDocument)
+			r.Post("/rfi-documents/{id}/approve", adminH.ApproveRFIDocument)
+			r.Post("/rfi-documents/{id}/reject", adminH.RejectRFIDocument)
+
+			// Override 审计日志
+			r.Get("/override-audit-logs", adminH.ListOverrideAuditLogs)
+
+			// Tier-Based Acquiring Channels API
+			r.Route("/api/v3/channels", func(r chi.Router) {
+				r.Get("/", v3ChannelsH.ListChannels)
+				r.Post("/", v3ChannelsH.CreateChannel)
+				r.Patch("/{id}", v3ChannelsH.UpdateChannel)
+				r.Post("/{id}/enable", v3ChannelsH.EnableChannel)
+				r.Post("/{id}/disable", v3ChannelsH.DisableChannel)
+				r.Post("/{id}/reload", v3ChannelsH.ReloadChannel)
+			})
+
+			// Tier-Based Issuing Pools API
+			r.Route("/api/v3/issuing/pools", func(r chi.Router) {
+				r.Get("/", v3IssuingPoolsH.ListPools)
+				r.Post("/", v3IssuingPoolsH.CreatePool)
+				r.Patch("/{id}", v3IssuingPoolsH.UpdatePool)
+				r.Post("/{id}/enable", v3IssuingPoolsH.EnablePool)
+				r.Post("/{id}/disable", v3IssuingPoolsH.DisablePool)
+				r.Post("/{id}/reload", v3IssuingPoolsH.ReloadPool)
+			})
+		})
 
 		// R3-3: 数据录入端点
 		r.Post("/bank-account", adminH.CreateBankAccount) // 银行账户（表 bank_account_balance）
@@ -206,6 +333,12 @@ func main() {
 		})
 		r.Get("/webhook/events", webhookH.ListEvents)
 		r.Post("/webhook/events/{id}/replay", webhookH.Replay)
+
+		// 任务包 B: Risk events
+		if riskH != nil {
+			r.Get("/risk/events", riskH.ListEvents)
+			r.Get("/risk/events/{id}", riskH.GetEvent)
+		}
 	})
 
 	r.Route("/merchant", func(r chi.Router) {
@@ -226,6 +359,18 @@ func main() {
 		r.Post("/sweep/{id}/reconcile", treasuryH.Reconcile)
 		r.Post("/sweep/approval/{id}/approve", treasuryH.ApproveSweep)
 		r.Post("/mae/{mae_id}/circuit-break", maeH.CircuitBreak)
+		// Dispute endpoints
+		r.Post("/dispute/refund", disputeH.RefundConfirmed)
+		r.Post("/dispute/chargeback", disputeH.ChargebackReceived)
+		r.Post("/dispute/{dispute_id}/reverse", disputeH.ChargebackReversed)
+		// 任务包 B: Anti-Carding endpoints
+		if riskH != nil {
+			r.Post("/risk/evaluate", riskH.Evaluate)
+			r.Post("/risk/failure", riskH.RecordFailure)
+			r.Post("/risk/success", riskH.RecordSuccess)
+			r.Post("/risk/cooldown/{merchant_id}", riskH.SetCooldown)
+			r.Delete("/risk/cooldown/{merchant_id}", riskH.ClearCooldown)
+		}
 		// R2-2: TestingEvaluate 已下线（worker tick 覆盖真实评估）
 	})
 
@@ -249,15 +394,103 @@ func main() {
 	checkoutTmpl, err := template.ParseFiles("web/checkout/checkout.html")
 	if err != nil {
 		log.Warn("checkout template not found, checkout disabled", "err", err)
-	} else {
-		// R3-1: 创建支付网关（mock/real 按配置切换）
-		paymentGW := checkout.NewMockPaymentGateway()
-		checkoutH := checkout.NewHandler(tokenSvc, nil, paymentGW, checkoutTmpl)
-		r.Get("/checkout", checkoutH.ServeCheckoutPage)
-		r.Route("/api/checkout", func(r chi.Router) {
-			r.Get("/validate", checkoutH.HandleValidateToken)
-			r.Post("/charge", checkoutH.HandleCharge)
+	}
+
+	// 初始化 Acquirer Registry（所有模式都需要）
+	var paymentGW checkout.PaymentGateway
+	var acqH *acquirerhandler.Handler
+
+	if checkoutTmpl != nil {
+		// 始终创建 acquirerRepo 和 acqReg（无论 mock 或 real 模式）
+		acquirerRepo := repository.New(pool)
+
+		// 判断是否是 real 模式
+		isRealMode := cfg.AcquirerMode == "real" || cfg.AppEnv == "production"
+
+		acqReg := registry.NewChannelRegistry(registry.RegistryConfig{
+			Repo:       acquirerRepo,
+			Encryptor:  enc,
+			RDB:        rdb,
+			Logger:     log,
+			FailMode:   registry.FailModeClosed, // production 默认 fail-closed
+			IsRealMode: isRealMode,
 		})
+
+		// 启动时预热：加载所有 active channel（无论 mock 或 real 模式）
+		if err := acqReg.LoadAll(ctx); err != nil {
+			log.Error("acquirer registry load all failed", "err", err)
+			if isRealMode {
+				log.Error("acquirer registry initialization failed in real/production mode, fail-closed")
+				os.Exit(1)
+			}
+			// mock/local 模式允许继续（会使用 fallback mock）
+			log.Warn("continuing in mock/local mode without preloaded channels")
+		} else {
+			channelCount := len(acqReg.ListAll())
+			log.Info("acquirer registry loaded", "channels", channelCount)
+		}
+
+		// Redis 可用时订阅配置变更（无论 mock 或 real 模式）
+		if rdb != nil {
+			if err := acqReg.SubscribeConfigUpdates(ctx); err != nil {
+				log.Warn("acquirer registry subscribe failed", "err", err)
+			} else {
+				log.Info("acquirer registry subscribed to config updates")
+			}
+		}
+
+		// 创建 AcquirerGateway（使用 ChannelRegistry）
+		// isReal=true 时会拒绝 raw card，要求 payment_method_token
+		// 初始化管道隔离服务（暂时使用 nil repository，后续需要实现）
+		pipelineSvc := pipeline.NewService(nil, time.Now)
+		paymentGW = checkout.NewAcquirerGateway(acqReg, pipelineSvc, isRealMode)
+
+		// 创建 acquirer service 和 handler（无论 mock 或 real 模式）
+		acqSvc := acquirer.NewService(acquirerRepo, acqReg, enc, log)
+		acqH = acquirerhandler.New(acqSvc, enc)
+
+		// 注册 Acquirer 管理 API（无论 mock 或 real 模式）
+		r.Route("/admin/acquirer", func(r chi.Router) {
+			r.Use(httpx.AdminAuth(cfg.JWTSecret))
+			r.Get("/providers", acqH.ListProviders)
+			r.Post("/providers", acqH.CreateProvider)
+			r.Get("/channels", acqH.ListChannels)
+			r.Post("/channels", acqH.CreateChannel)
+			r.Patch("/channels/{id}", acqH.UpdateChannel)
+			r.Post("/channels/{id}/enable", acqH.EnableChannel)
+			r.Post("/channels/{id}/disable", acqH.DisableChannel)
+			r.Post("/channels/{id}/rotate-secret", acqH.RotateSecret)
+			r.Post("/channels/{id}/reload", acqH.ReloadChannel)
+		})
+
+		log.Info("acquirer gateway initialized", "is_real", isRealMode)
+	}
+
+	// 设置 checkout handler（如果模板可用）
+	if checkoutTmpl != nil && paymentGW != nil {
+		var orderProvider checkout.OrderProvider
+		switch cfg.CheckoutOrderProvider {
+		case "mock":
+			orderProvider = checkout.NewMockOrderProvider()
+		case "disabled":
+			log.Warn("checkout order provider disabled, checkout routes not registered")
+		case "http":
+			log.Error("checkout HTTP order provider is not implemented; refusing to start with mock fallback")
+			os.Exit(1)
+		default:
+			log.Error("unknown checkout order provider", "provider", cfg.CheckoutOrderProvider)
+			os.Exit(1)
+		}
+
+		if orderProvider != nil {
+			checkoutH := checkout.NewHandler(tokenSvc, orderProvider, paymentGW, riskGateway, checkoutTmpl)
+			r.Get("/checkout", checkoutH.ServeCheckoutPage)
+			r.Route("/api/checkout", func(r chi.Router) {
+				r.Post("/token", checkoutH.HandleCreateToken)
+				r.Get("/validate", checkoutH.HandleValidateToken)
+				r.Post("/charge", checkoutH.HandleCharge)
+			})
+		}
 	}
 
 	srv := &http.Server{

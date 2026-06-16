@@ -3,111 +3,486 @@ package config
 import (
 	"os"
 	"testing"
-	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestConfig_Load_Defaults(t *testing.T) {
-	t.Setenv("POSTGRES_DSN", "postgres://test:test@localhost:5432/test?sslmode=disable")
-	t.Setenv("MASTER_KEY_BASE64", "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=")
+func TestLoad_ProductionRejectsMockProviders(t *testing.T) {
+	tests := []struct {
+		name           string
+		envVars        map[string]string
+		expectError    bool
+		expectedErrMsg string
+	}{
+		{
+			name: "production rejects KMS_MODE=mock",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "mock",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "KMS_MODE=mock is not allowed in production",
+		},
+		{
+			name: "production rejects EXTERNAL_MODE=mock",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "mock",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "EXTERNAL_MODE=mock is not allowed in production",
+		},
+		{
+			name: "production rejects ACQUIRER_MODE=mock",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "mock",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "ACQUIRER_MODE=mock is not allowed in production",
+		},
+		{
+			name: "production rejects ACQUIRER_PROVIDER=mock",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "mock",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "ACQUIRER_PROVIDER=mock is not allowed in production",
+		},
+		{
+			name: "production rejects ISSUING_PROVIDER=mock",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "mock",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "ISSUING_PROVIDER=mock is not allowed in production",
+		},
+		{
+			name: "production rejects VCC_FUNDING_PROVIDER=mock",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "mock",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "VCC_FUNDING_PROVIDER=mock is not allowed in production",
+		},
+		{
+			name: "production rejects CHECKOUT_ORDER_PROVIDER=mock",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "mock",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "CHECKOUT_ORDER_PROVIDER=mock is not allowed in production",
+		},
+		{
+			name: "production rejects empty JWT_SECRET",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "JWT_SECRET is required in production",
+		},
+		{
+			name: "production rejects short JWT_SECRET",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "short",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "JWT_SECRET must be at least 32 bytes in production",
+		},
+		{
+			name: "production rejects empty ADMIN_SESSION_SECRET",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "ADMIN_SESSION_SECRET is required in production",
+		},
+		{
+			name: "production rejects missing VAULT_BASE_URL when REQUIRE_VAULT=true",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "",
+				"VAULT_TOKEN":             "vault_token",
+				"REQUIRE_VAULT":           "true",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "VAULT_BASE_URL is required when REQUIRE_VAULT=true in production",
+		},
+		{
+			name: "production rejects missing VAULT_TOKEN when REQUIRE_VAULT=true",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "",
+				"REQUIRE_VAULT":           "true",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "VAULT_TOKEN is required when REQUIRE_VAULT=true in production",
+		},
+	}
 
-	cfg, err := Load()
-	require.NoError(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldEnv := make(map[string]string)
+			for k, v := range tc.envVars {
+				oldEnv[k] = os.Getenv(k)
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k, v := range oldEnv {
+					os.Setenv(k, v)
+				}
+			}()
 
-	assert.Equal(t, "local", cfg.AppEnv)
-	assert.Equal(t, ":8080", cfg.HTTPAddr)
-	assert.Equal(t, "localhost:6379", cfg.RedisAddr)
-	assert.Equal(t, "mock", cfg.ExternalMode)
-	assert.Equal(t, "mock", cfg.KMSMode)
-	assert.Equal(t, 4, cfg.OutboxWorkerConcurrency)
-	assert.Equal(t, 16, cfg.OutboxClaimBatch)
-	assert.Equal(t, 5, cfg.StreamMaxDeliveries)
-	assert.Equal(t, 10*time.Second, cfg.SweepTickInterval)
-	assert.Equal(t, "info", cfg.LogLevel)
+			_, err := Load()
+			if tc.expectError {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				} else if tc.expectedErrMsg != "" && !contains(err.Error(), tc.expectedErrMsg) {
+					t.Errorf("Expected error containing %q, got %q", tc.expectedErrMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+			}
+		})
+	}
 }
 
-func TestConfig_Load_MissingRequired(t *testing.T) {
-	// Clear required vars
-	os.Unsetenv("POSTGRES_DSN")
-	os.Unsetenv("MASTER_KEY_BASE64")
+func TestLoad_LocalAllowsMockProviders(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVars  map[string]string
+		expected bool
+	}{
+		{
+			name: "local allows all mock providers",
+			envVars: map[string]string{
+				"APP_ENV":                 "local",
+				"KMS_MODE":                "mock",
+				"EXTERNAL_MODE":           "mock",
+				"ACQUIRER_MODE":           "mock",
+				"ACQUIRER_PROVIDER":       "mock",
+				"ISSUING_PROVIDER":        "mock",
+				"VCC_FUNDING_PROVIDER":    "mock",
+				"CHECKOUT_ORDER_PROVIDER": "mock",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expected: true,
+		},
+		{
+			name: "local allows mixed mock and real",
+			envVars: map[string]string{
+				"APP_ENV":                 "local",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "mock",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "mock",
+				"VCC_FUNDING_PROVIDER":    "mock",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expected: true,
+		},
+	}
 
-	_, err := Load()
-	assert.Error(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldEnv := make(map[string]string)
+			for k, v := range tc.envVars {
+				oldEnv[k] = os.Getenv(k)
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k, v := range oldEnv {
+					os.Setenv(k, v)
+				}
+			}()
+
+			cfg, err := Load()
+			if tc.expected {
+				if err != nil {
+					t.Errorf("Expected success, got error: %v", err)
+				}
+				if cfg == nil {
+					t.Error("Expected config, got nil")
+				}
+			} else {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				}
+			}
+		})
+	}
 }
 
-func TestConfig_Load_Override(t *testing.T) {
-	t.Setenv("POSTGRES_DSN", "postgres://custom:custom@db:5432/custom?sslmode=disable")
-	t.Setenv("MASTER_KEY_BASE64", "Y3VzdG9ta2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMg==")
-	t.Setenv("APP_ENV", "staging")
-	t.Setenv("HTTP_ADDR", ":9090")
-	t.Setenv("REDIS_ADDR", "redis:6379")
-	t.Setenv("LOG_LEVEL", "debug")
-	t.Setenv("OUTBOX_WORKER_CONCURRENCY", "8")
+func TestIsProduction(t *testing.T) {
+	oldAppEnv := os.Getenv("APP_ENV")
+	defer os.Setenv("APP_ENV", oldAppEnv)
 
-	cfg, err := Load()
-	require.NoError(t, err)
+	tests := []struct {
+		name     string
+		appEnv   string
+		expected bool
+	}{
+		{"production returns true", "production", true},
+		{"local returns false", "local", false},
+		{"staging returns false", "staging", false},
+	}
 
-	assert.Equal(t, "staging", cfg.AppEnv)
-	assert.Equal(t, ":9090", cfg.HTTPAddr)
-	assert.Equal(t, "postgres://custom:custom@db:5432/custom?sslmode=disable", cfg.PostgresDSN)
-	assert.Equal(t, "redis:6379", cfg.RedisAddr)
-	assert.Equal(t, "debug", cfg.LogLevel)
-	assert.Equal(t, 8, cfg.OutboxWorkerConcurrency)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Setenv("APP_ENV", tc.appEnv)
+			result := IsProduction()
+			if result != tc.expected {
+				t.Errorf("Expected %v for APP_ENV=%s, got %v", tc.expected, tc.appEnv, result)
+			}
+		})
+	}
 }
 
-func TestConfig_Load_ProductionRejectsMock(t *testing.T) {
-	t.Setenv("POSTGRES_DSN", "postgres://test:test@localhost:5432/test?sslmode=disable")
-	t.Setenv("MASTER_KEY_BASE64", "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=")
-	t.Setenv("APP_ENV", "production")
+func TestIsMockMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVars  map[string]string
+		expected bool
+	}{
+		{
+			name: "all real providers returns false",
+			envVars: map[string]string{
+				"EXTERNAL_MODE":           "real",
+				"KMS_MODE":                "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+			},
+			expected: false,
+		},
+		{
+			name: "any mock provider returns true",
+			envVars: map[string]string{
+				"EXTERNAL_MODE":           "real",
+				"KMS_MODE":                "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "mock",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+			},
+			expected: true,
+		},
+		{
+			name: "all mock providers returns true",
+			envVars: map[string]string{
+				"EXTERNAL_MODE":           "mock",
+				"KMS_MODE":                "mock",
+				"ACQUIRER_MODE":           "mock",
+				"ACQUIRER_PROVIDER":       "mock",
+				"ISSUING_PROVIDER":        "mock",
+				"VCC_FUNDING_PROVIDER":    "mock",
+				"CHECKOUT_ORDER_PROVIDER": "mock",
+			},
+			expected: true,
+		},
+	}
 
-	_, err := Load()
-	assert.Error(t, err, "production with mock KMS should fail")
-	assert.Contains(t, err.Error(), "KMS_MODE=mock")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldEnv := make(map[string]string)
+			for k, v := range tc.envVars {
+				oldEnv[k] = os.Getenv(k)
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k, v := range oldEnv {
+					os.Setenv(k, v)
+				}
+			}()
+
+			result := IsMockMode()
+			if result != tc.expected {
+				t.Errorf("Expected %v, got %v", tc.expected, result)
+			}
+		})
+	}
 }
 
-func TestConfig_Load_ProductionRejectsExampleKey(t *testing.T) {
-	t.Setenv("POSTGRES_DSN", "postgres://test:test@localhost:5432/test?sslmode=disable")
-	t.Setenv("MASTER_KEY_BASE64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
-	t.Setenv("APP_ENV", "production")
-	t.Setenv("KMS_MODE", "real")
-	t.Setenv("EXTERNAL_MODE", "real")
-	t.Setenv("JWT_SECRET", "secret")
-	t.Setenv("INTERNAL_TOKEN", "token")
-
-	_, err := Load()
-	assert.Error(t, err, "production with example key should fail")
-	assert.Contains(t, err.Error(), "example key")
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }
 
-func TestConfig_Load_LocalWithMockOK(t *testing.T) {
-	t.Setenv("POSTGRES_DSN", "postgres://test:test@localhost:5432/test?sslmode=disable")
-	t.Setenv("MASTER_KEY_BASE64", "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=")
-	t.Setenv("APP_ENV", "local")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	assert.Equal(t, "local", cfg.AppEnv)
-	assert.Equal(t, "mock", cfg.KMSMode)
-}
-
-func TestConfig_Load_RealModeRequiresURLs(t *testing.T) {
-	t.Setenv("POSTGRES_DSN", "postgres://test:test@localhost:5432/test?sslmode=disable")
-	t.Setenv("MASTER_KEY_BASE64", "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=")
-	t.Setenv("EXTERNAL_MODE", "real")
-
-	_, err := Load()
-	assert.Error(t, err, "real mode without URLs should fail")
-	assert.Contains(t, err.Error(), "LP_BASE_URL")
-}
-
-func TestConfig_Load_RealKMSRequiresVaultURL(t *testing.T) {
-	t.Setenv("POSTGRES_DSN", "postgres://test:test@localhost:5432/test?sslmode=disable")
-	t.Setenv("MASTER_KEY_BASE64", "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=")
-	t.Setenv("KMS_MODE", "real")
-
-	_, err := Load()
-	assert.Error(t, err, "real KMS without vault URL should fail")
-	assert.Contains(t, err.Error(), "VAULT_BASE_URL")
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

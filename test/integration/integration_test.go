@@ -567,8 +567,8 @@ func TestLedgerInsertInTransaction(t *testing.T) {
 			AggregateType:   "test",
 			Description:     "test transaction",
 			Entries: []ledgerdomain.Entry{
-				{AccountID: accID.String(), Direction: ledgerdomain.DirectionDebit, Amount: decimal.NewFromInt(100)},
-				{AccountID: accID.String(), Direction: ledgerdomain.DirectionCredit, Amount: decimal.NewFromInt(100)},
+				{AccountID: accID, Direction: ledgerdomain.DirectionDebit, Amount: decimal.NewFromInt(100)},
+				{AccountID: accID, Direction: ledgerdomain.DirectionCredit, Amount: decimal.NewFromInt(100)},
 			},
 		})
 		return err
@@ -628,7 +628,7 @@ func TestManualReviewBlocksRelease(t *testing.T) {
 
 	payoutRepo := payoutrepo.New(env.pool)
 	ledgerRepo := payoutrepo.NewLedgerRepo(env.pool)
-	worker := payoutworker.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool, slog.Default())
+	worker := payoutworker.New(payoutRepo, ledgerRepo, nil, nil, env.txm, env.pool, slog.Default())
 
 	// Release 必须被拒绝
 	err = worker.Release(ctx, payoutID)
@@ -720,7 +720,7 @@ func TestPayoutConfirmSettlesFrozen(t *testing.T) {
 	payoutRepo := payoutrepo.New(env.pool)
 	ledgerRepo := payoutrepo.NewLedgerRepo(env.pool)
 	payoutSvc := payoutservice.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool)
-	payoutWorker := payoutworker.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool, slog.Default())
+	payoutWorker := payoutworker.New(payoutRepo, ledgerRepo, nil, nil, env.txm, env.pool, slog.Default())
 
 	freezeResult, err := payoutSvc.Freeze(ctx, payoutservice.FreezeCmd{
 		PayoutRequestID: uuid.New(),
@@ -788,7 +788,7 @@ func TestPayoutReleaseRefundsFrozen(t *testing.T) {
 	payoutRepo := payoutrepo.New(env.pool)
 	ledgerRepo := payoutrepo.NewLedgerRepo(env.pool)
 	payoutSvc := payoutservice.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool)
-	payoutWorker := payoutworker.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool, slog.Default())
+	payoutWorker := payoutworker.New(payoutRepo, ledgerRepo, nil, nil, env.txm, env.pool, slog.Default())
 
 	freezeResult, err := payoutSvc.Freeze(ctx, payoutservice.FreezeCmd{
 		PayoutRequestID: uuid.New(),
@@ -851,7 +851,7 @@ func TestPayoutConfirmIdempotent(t *testing.T) {
 	payoutRepo := payoutrepo.New(env.pool)
 	ledgerRepo := payoutrepo.NewLedgerRepo(env.pool)
 	payoutSvc := payoutservice.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool)
-	payoutWorker := payoutworker.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool, slog.Default())
+	payoutWorker := payoutworker.New(payoutRepo, ledgerRepo, nil, nil, env.txm, env.pool, slog.Default())
 
 	freezeResult, err := payoutSvc.Freeze(ctx, payoutservice.FreezeCmd{
 		PayoutRequestID: uuid.New(),

@@ -478,3 +478,230 @@ func TestApproveSweep_NotEnoughApprovals(t *testing.T) {
 	require.NoError(t, err)
 	repo.AssertNotCalled(t, "InsertTransfer")
 }
+
+// ============================================================================
+// RiskHold Blocking Sweep Tests
+// ============================================================================
+
+func TestRiskHold_BlockSweep(t *testing.T) {
+	// 测试 RiskHold 阻断 sweep
+	// 当账户有 RiskHold 时，sweep 应该被阻断
+	rule := &domain.SweepRule{
+		ID:                    "rule-1",
+		TriggerThresholdMinor: 1000,
+		SweepRatioBps:         10000,
+		MaxSingleSweepMinor:   100000,
+		MinResidualMinor:      0,
+		MaxDailySweepCount:    10,
+	}
+
+	// RiskHold 场景：净额为负（被冻结）
+	input := domain.SweepTriggerInput{
+		NetSweepAmount:   -500, // 负数表示被 RiskHold 阻断
+		DailySweepCount:  0,
+		Rule:             rule,
+		WithinWindow:     true,
+		RequiresApproval: false,
+	}
+
+	decision := domain.EvaluateSweepTrigger(input)
+	assert.Equal(t, domain.SweepAccumulate, decision, "RiskHold should block sweep")
+}
+
+func TestRiskHold_ZeroNetAmount(t *testing.T) {
+	// 测试净额为零时不触发 sweep
+	rule := &domain.SweepRule{
+		ID:                    "rule-1",
+		TriggerThresholdMinor: 1000,
+		SweepRatioBps:         10000,
+		MaxSingleSweepMinor:   100000,
+		MinResidualMinor:      0,
+		MaxDailySweepCount:    10,
+	}
+
+	input := domain.SweepTriggerInput{
+		NetSweepAmount:   0, // 净额为零
+		DailySweepCount:  0,
+		Rule:             rule,
+		WithinWindow:     true,
+		RequiresApproval: false,
+	}
+
+	decision := domain.EvaluateSweepTrigger(input)
+	assert.Equal(t, domain.SweepAccumulate, decision, "zero net amount should not trigger sweep")
+}
+
+// ============================================================================
+// Corporate Entity RiskHold Isolation Tests
+// ============================================================================
+
+func TestCorporateEntityRiskHold_Isolation(t *testing.T) {
+	// 测试法人实体的 RiskHold 隔离
+	// 不同法人实体的 RiskHold 应该相互隔离
+
+	// Entity A 有 RiskHold
+	_ = uuid.New() // entityAID
+	_ = uuid.New() // entityBID
+
+	// Entity A 的 sweep 应该被阻断
+	ruleA := &domain.SweepRule{
+		ID:                    "rule-entity-a",
+		TriggerThresholdMinor: 1000,
+		MaxDailySweepCount:    10,
+	}
+
+	inputA := domain.SweepTriggerInput{
+		NetSweepAmount:   -500, // Entity A 有 RiskHold
+		DailySweepCount:  0,
+		Rule:             ruleA,
+		WithinWindow:     true,
+		RequiresApproval: false,
+	}
+
+	decisionA := domain.EvaluateSweepTrigger(inputA)
+	assert.Equal(t, domain.SweepAccumulate, decisionA, "Entity A RiskHold should block Entity A sweep")
+
+	// Entity B 没有 RiskHold，可以正常 sweep
+	ruleB := &domain.SweepRule{
+		ID:                    "rule-entity-b",
+		TriggerThresholdMinor: 1000, // 设置阈值
+		MaxDailySweepCount:    10,
+	}
+
+	inputB := domain.SweepTriggerInput{
+		NetSweepAmount:   5000, // Entity B 正常，超过阈值
+		DailySweepCount:  0,
+		Rule:             ruleB,
+		WithinWindow:     true,
+		RequiresApproval: false,
+	}
+
+	decisionB := domain.EvaluateSweepTrigger(inputB)
+	assert.Equal(t, domain.SweepSubmit, decisionB, "Entity B should be able to sweep without Entity A RiskHold")
+}
+
+// ============================================================================
+// Buffer Percent Calculation Tests
+// ============================================================================
+
+func TestBufferPercent_Calculation(t *testing.T) {
+	// 测试 buffer_percent 计算
+	// buffer_percent 用于预留一定比例的金额作为缓冲
+
+	// 5% buffer
+	bufferPercent := 5.0
+	totalAmount := 10000.0
+
+	bufferAmount := totalAmount * bufferPercent / 100
+	assert.Equal(t, 500.0, bufferAmount, "5% buffer of 10000 should be 500")
+
+	// 可用于 sweep 的金额
+	sweepableAmount := totalAmount - bufferAmount
+	assert.Equal(t, 9500.0, sweepableAmount, "sweepable amount should be 9500")
+}
+
+func TestBufferPercent_ZeroBuffer(t *testing.T) {
+	// 测试零 buffer
+	bufferPercent := 0.0
+	totalAmount := 10000.0
+
+	bufferAmount := totalAmount * bufferPercent / 100
+	assert.Equal(t, 0.0, bufferAmount, "0% buffer should be 0")
+
+	sweepableAmount := totalAmount - bufferAmount
+	assert.Equal(t, 10000.0, sweepableAmount, "full amount should be sweepable")
+}
+
+func TestBufferPercent_MaxBuffer(t *testing.T) {
+	// 测试最大 buffer（20%）
+	bufferPercent := 20.0
+	totalAmount := 10000.0
+
+	bufferAmount := totalAmount * bufferPercent / 100
+	assert.Equal(t, 2000.0, bufferAmount, "20% buffer of 10000 should be 2000")
+
+	sweepableAmount := totalAmount - bufferAmount
+	assert.Equal(t, 8000.0, sweepableAmount, "sweepable amount should be 8000")
+}
+
+func TestBufferPercent_NegativeBuffer(t *testing.T) {
+	// 测试负 buffer（不允许）
+	bufferPercent := -5.0
+	totalAmount := 10000.0
+
+	// 负 buffer 应该被视为 0
+	if bufferPercent < 0 {
+		bufferPercent = 0
+	}
+
+	bufferAmount := totalAmount * bufferPercent / 100
+	assert.Equal(t, 0.0, bufferAmount, "negative buffer should be treated as 0")
+}
+
+// ============================================================================
+// Beneficiary Evaluation Tests
+// ============================================================================
+
+func TestBeneficiaryEvaluation_UnknownRejected(t *testing.T) {
+	// 测试 UNKNOWN beneficiary 类型被拒绝
+	rule := &domain.SweepRule{
+		BeneficiaryType: domain.BeneficiaryUnknown,
+	}
+
+	result := domain.EvaluateBeneficiary(rule, 1000)
+	assert.False(t, result.Allowed)
+	assert.Equal(t, "UNKNOWN beneficiary type is not allowed", result.RejectReason)
+}
+
+func TestBeneficiaryEvaluation_SameNameUnverified(t *testing.T) {
+	// 测试 SAME_NAME 但未验证需要审批
+	rule := &domain.SweepRule{
+		BeneficiaryType:  domain.BeneficiarySameName,
+		SameNameVerified: false,
+	}
+
+	result := domain.EvaluateBeneficiary(rule, 1000)
+	assert.True(t, result.Allowed)
+	assert.True(t, result.RequiresApproval)
+}
+
+func TestBeneficiaryEvaluation_SameNameVerified(t *testing.T) {
+	// 测试 SAME_NAME 已验证无需审批
+	rule := &domain.SweepRule{
+		BeneficiaryType:  domain.BeneficiarySameName,
+		SameNameVerified: true,
+	}
+
+	result := domain.EvaluateBeneficiary(rule, 1000)
+	assert.True(t, result.Allowed)
+	assert.False(t, result.RequiresApproval)
+}
+
+func TestBeneficiaryEvaluation_ThirdPartyLargeAmount(t *testing.T) {
+	// 测试 THIRD_PARTY 大额需要审批
+	rule := &domain.SweepRule{
+		BeneficiaryType:        domain.BeneficiaryThirdParty,
+		ApprovalThresholdMinor: 5000,
+	}
+
+	// 小额无需审批
+	resultSmall := domain.EvaluateBeneficiary(rule, 1000)
+	assert.True(t, resultSmall.Allowed)
+	assert.False(t, resultSmall.RequiresApproval)
+
+	// 大额需要审批
+	resultLarge := domain.EvaluateBeneficiary(rule, 6000)
+	assert.True(t, resultLarge.Allowed)
+	assert.True(t, resultLarge.RequiresApproval)
+}
+
+func TestBeneficiaryEvaluation_ThirdPartyCrossBorder(t *testing.T) {
+	// 测试 THIRD_PARTY_CROSS_BORDER 总是需要审批
+	rule := &domain.SweepRule{
+		BeneficiaryType: domain.BeneficiaryThirdPartyCrossBorder,
+	}
+
+	result := domain.EvaluateBeneficiary(rule, 1000)
+	assert.True(t, result.Allowed)
+	assert.True(t, result.RequiresApproval)
+}
