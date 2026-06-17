@@ -49,7 +49,10 @@ func (h *V3ChannelsHandler) ListChannels(w http.ResponseWriter, r *http.Request)
 	for rows.Next() {
 		var id, entityID, providerTier, providerCode, channelCode, strategyMode, status, providerConfig, routingConfig, created, updated string
 		var version int
-		rows.Scan(&id, &entityID, &providerTier, &providerCode, &channelCode, &strategyMode, &status, &version, &providerConfig, &routingConfig, &created, &updated)
+		if err := rows.Scan(&id, &entityID, &providerTier, &providerCode, &channelCode, &strategyMode, &status, &version, &providerConfig, &routingConfig, &created, &updated); err != nil {
+			writeErr(w, err)
+			return
+		}
 
 		items = append(items, map[string]interface{}{
 			"id":              id,
@@ -60,8 +63,8 @@ func (h *V3ChannelsHandler) ListChannels(w http.ResponseWriter, r *http.Request)
 			"strategy_mode":   strategyMode,
 			"status":          status,
 			"version":         version,
-			"provider_config": providerConfig,
-			"routing_config":  routingConfig,
+			"provider_config": sanitizeJSONText(providerConfig),
+			"routing_config":  sanitizeJSONText(routingConfig),
 			"created_at":      created,
 			"updated_at":      updated,
 			"has_credential":  true,
@@ -130,10 +133,11 @@ func (h *V3ChannelsHandler) UpdateChannel(w http.ResponseWriter, r *http.Request
 	}
 
 	var req struct {
-		ProviderTier   string                 `json:"provider_tier"`
-		StrategyMode   string                 `json:"strategy_mode"`
-		ProviderConfig map[string]interface{} `json:"provider_config"`
-		RoutingConfig  map[string]interface{} `json:"routing_config"`
+		ProviderTier       string                 `json:"provider_tier"`
+		CredentialVaultKey string                 `json:"credential_vault_key"`
+		StrategyMode       string                 `json:"strategy_mode"`
+		ProviderConfig     map[string]interface{} `json:"provider_config"`
+		RoutingConfig      map[string]interface{} `json:"routing_config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
@@ -165,6 +169,11 @@ func (h *V3ChannelsHandler) UpdateChannel(w http.ResponseWriter, r *http.Request
 	if req.StrategyMode != "" {
 		updates = append(updates, "strategy_mode = $"+string(rune(argIdx+'0')))
 		args = append(args, req.StrategyMode)
+		argIdx++
+	}
+	if req.CredentialVaultKey != "" {
+		updates = append(updates, "credential_vault_key = $"+string(rune(argIdx+'0')))
+		args = append(args, req.CredentialVaultKey)
 		argIdx++
 	}
 	if req.ProviderConfig != nil {

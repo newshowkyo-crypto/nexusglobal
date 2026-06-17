@@ -150,3 +150,58 @@ func TestDashboardHTMLDetailAPICalls(t *testing.T) {
 		t.Error("showTaskDetail should call /admin/outbox/{id} API")
 	}
 }
+
+func TestDashboardHTMLContainsTierFundingGuard(t *testing.T) {
+	html := dashboardHTML("test", "Connected", "ok", "Connected", "ok", "1h0m0s", "go1.21", 4, 10, 100, 200)
+
+	required := []string{
+		"function syncTierFundingGuard",
+		"TIER_1_HIGH_RISK",
+		"CRYPTO_DESENSITIZED",
+		"FIAT_DIRECT",
+		"高风险资金已强制进入异步合规隔离路径",
+		"fiat-direct-panel",
+		"crypto-pool-panel",
+	}
+
+	for _, pattern := range required {
+		if !strings.Contains(html, pattern) {
+			t.Errorf("Dashboard HTML missing tier funding guard pattern: %s", pattern)
+		}
+	}
+}
+
+func TestDashboardHTMLContainsIssuingPoolDeclineSlider(t *testing.T) {
+	html := dashboardHTML("test", "Connected", "ok", "Connected", "ok", "1h0m0s", "go1.21", 4, 10, 100, 200)
+
+	required := []string{
+		"new-iss-decline-limit",
+		"declined_count_sliding_window",
+		"BIN 码健康滑块",
+	}
+
+	for _, pattern := range required {
+		if !strings.Contains(html, pattern) {
+			t.Errorf("Dashboard HTML missing issuing pool decline slider pattern: %s", pattern)
+		}
+	}
+}
+
+func TestDashboardHTMLContainsLockdownAndSSE(t *testing.T) {
+	html := dashboardHTML("test", "Connected", "ok", "Connected", "ok", "1h0m0s", "go1.21", 4, 10, 100, 200)
+
+	required := []string{
+		"triggerSystemLockdown",
+		"/api/v3/system/lockdown",
+		"系统紧急全盘锁死",
+		"EventSource",
+		"/api/v3/events/stream",
+		"ISSUING_POOL_FRAUD_TRIPPED",
+	}
+
+	for _, pattern := range required {
+		if !strings.Contains(html, pattern) {
+			t.Errorf("Dashboard HTML missing lockdown/SSE pattern: %s", pattern)
+		}
+	}
+}

@@ -173,6 +173,7 @@ func main() {
 	adminH := admin.NewHandler(pool, enc)
 	v3ChannelsH := admin.NewV3ChannelsHandler(pool, rdb)
 	v3IssuingPoolsH := admin.NewV3IssuingPoolsHandler(pool, rdb)
+	killSwitchH := admin.NewKillSwitchHandler(pool, rdb)
 
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(httpx.AdminAuth(cfg.JWTSecret))
@@ -313,6 +314,30 @@ func main() {
 		r.Post("/webhook-proxy", adminH.CreateWebhookProxy)
 		r.Post("/merchant-create", adminH.CreateMerchant)
 		r.Post("/payout-address", adminH.CreatePayoutAddress)
+
+		// Tier-Based Admin API (Dashboard calls /admin/api/v3/*)
+		r.Route("/api/v3", func(r chi.Router) {
+			r.Route("/channels", func(r chi.Router) {
+				r.Get("/", v3ChannelsH.ListChannels)
+				r.Post("/", v3ChannelsH.CreateChannel)
+				r.Patch("/{id}", v3ChannelsH.UpdateChannel)
+				r.Post("/{id}/enable", v3ChannelsH.EnableChannel)
+				r.Post("/{id}/disable", v3ChannelsH.DisableChannel)
+				r.Post("/{id}/reload", v3ChannelsH.ReloadChannel)
+			})
+			r.Route("/issuing/pools", func(r chi.Router) {
+				r.Get("/", v3IssuingPoolsH.ListPools)
+				r.Post("/", v3IssuingPoolsH.CreatePool)
+				r.Patch("/{id}", v3IssuingPoolsH.UpdatePool)
+				r.Post("/{id}/enable", v3IssuingPoolsH.EnablePool)
+				r.Post("/{id}/disable", v3IssuingPoolsH.DisablePool)
+				r.Post("/{id}/reload", v3IssuingPoolsH.ReloadPool)
+			})
+			r.Route("/system", func(r chi.Router) {
+				r.Post("/lockdown", killSwitchH.Lockdown)
+			})
+			r.Get("/events/stream", killSwitchH.EventsStream)
+		})
 
 		r.Route("/merchant/{id}", func(r chi.Router) {
 			r.Get("/balance", ledgerH.GetBalance)

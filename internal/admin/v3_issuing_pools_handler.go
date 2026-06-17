@@ -34,7 +34,7 @@ func (h *V3IssuingPoolsHandler) publishConfigUpdate(poolID uuid.UUID, version in
 func (h *V3IssuingPoolsHandler) ListPools(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rows, err := h.pool.Query(ctx,
-		`SELECT id::text, entity_id::text, issuing_tier, funding_mode, provider_code, pool_code, 
+		`SELECT id::text, COALESCE(entity_id::text, ''), issuing_tier, funding_mode, provider_code, pool_code, 
 		 status, version, provider_config::text, velocity_config::text, 
 		 created_at::text, updated_at::text
 		 FROM issuing_providers ORDER BY created_at DESC`)
@@ -48,7 +48,10 @@ func (h *V3IssuingPoolsHandler) ListPools(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var id, entityID, issuingTier, fundingMode, providerCode, poolCode, status, providerConfig, velocityConfig, created, updated string
 		var version int
-		rows.Scan(&id, &entityID, &issuingTier, &fundingMode, &providerCode, &poolCode, &status, &version, &providerConfig, &velocityConfig, &created, &updated)
+		if err := rows.Scan(&id, &entityID, &issuingTier, &fundingMode, &providerCode, &poolCode, &status, &version, &providerConfig, &velocityConfig, &created, &updated); err != nil {
+			writeErr(w, err)
+			return
+		}
 
 		items = append(items, map[string]interface{}{
 			"id":              id,
@@ -59,8 +62,8 @@ func (h *V3IssuingPoolsHandler) ListPools(w http.ResponseWriter, r *http.Request
 			"pool_code":       poolCode,
 			"status":          status,
 			"version":         version,
-			"provider_config": providerConfig,
-			"velocity_config": velocityConfig,
+			"provider_config": sanitizeJSONText(providerConfig),
+			"velocity_config": sanitizeJSONText(velocityConfig),
 			"created_at":      created,
 			"updated_at":      updated,
 			"has_credential":  true,
@@ -133,10 +136,11 @@ func (h *V3IssuingPoolsHandler) UpdatePool(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		IssuingTier    string                 `json:"issuing_tier"`
-		FundingMode    string                 `json:"funding_mode"`
-		ProviderConfig map[string]interface{} `json:"provider_config"`
-		VelocityConfig map[string]interface{} `json:"velocity_config"`
+		IssuingTier        string                 `json:"issuing_tier"`
+		FundingMode        string                 `json:"funding_mode"`
+		CredentialVaultKey string                 `json:"credential_vault_key"`
+		ProviderConfig     map[string]interface{} `json:"provider_config"`
+		VelocityConfig     map[string]interface{} `json:"velocity_config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
@@ -170,6 +174,11 @@ func (h *V3IssuingPoolsHandler) UpdatePool(w http.ResponseWriter, r *http.Reques
 	if req.FundingMode != "" {
 		updates = append(updates, "funding_mode = $"+string(rune(argIdx+'0')))
 		args = append(args, req.FundingMode)
+		argIdx++
+	}
+	if req.CredentialVaultKey != "" {
+		updates = append(updates, "credential_vault_key = $"+string(rune(argIdx+'0')))
+		args = append(args, req.CredentialVaultKey)
 		argIdx++
 	}
 	if req.ProviderConfig != nil {

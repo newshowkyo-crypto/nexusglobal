@@ -148,7 +148,7 @@ table{overflow-x:auto;display:block}
 <div class="stat"><div class="label">运行环境</div><div class="value">` + env + `</div><div class="sub">Go ` + goVer + `</div></div>
 <div class="stat"><div class="label">内存使用</div><div class="value">` + fmt.Sprint(memAlloc) + ` MB</div><div class="sub">已分配 / 系统总计</div></div>
 <div class="stat"><div class="label">协程数</div><div class="value">` + fmt.Sprint(goroutines) + `</div><div class="sub">活跃 goroutine</div></div>
-</div><div class="section"><h2>业务统计 <button class="refresh-btn" onclick="loadStats()">刷新</button></h2><div id="stats-content" class="loading">加载中...</div></div></div>
+</div><div class="section"><h2>系统避险大闸 <button class="action-btn danger" onclick="triggerSystemLockdown()">系统紧急全盘锁死</button></h2><div id="global-risk-alert" class="empty">等待风险事件推送</div></div><div class="section"><h2>业务统计 <button class="refresh-btn" onclick="loadStats()">刷新</button></h2><div id="stats-content" class="loading">加载中...</div></div></div>
 <div id="tab-universal-adapter" class="tab">
 <div class="section"><h2>适配器提供商 <button class="refresh-btn" onclick="loadAdapterProviders()">刷新</button></h2>
 <div class="card">
@@ -307,7 +307,7 @@ table{overflow-x:auto;display:block}
 <h3>新增收单通道</h3>
 <div class="form-grid">
 <div class="form-group"><label>实体ID</label><input type="text" id="new-acq-entity-id" placeholder="输入实体ID"></div>
-<div class="form-group"><label>Provider Tier</label><select id="new-acq-provider-tier"><option value="TIER_1_HIGH_RISK">TIER_1_HIGH_RISK</option><option value="TIER_2_COMPLIANT">TIER_2_COMPLIANT</option></select></div>
+<div class="form-group"><label>Provider Tier</label><select id="new-acq-provider-tier" onchange="syncTierFundingGuard()"><option value="TIER_2_COMPLIANT">合规法币区</option><option value="TIER_1_HIGH_RISK">高风险合规隔离区</option></select><small id="tier-funding-tooltip" class="empty">合规通道可按卡池策略选择充值路径。</small></div>
 <div class="form-group"><label>Provider Code</label><input type="text" id="new-acq-provider-code" placeholder="如: stripe"></div>
 <div class="form-group"><label>Channel Code</label><input type="text" id="new-acq-channel-code" placeholder="如: stripe_visa"></div>
 <div class="form-group"><label>Credential Vault Key</label><input type="text" id="new-acq-vault-key" placeholder="vault://..."></div>
@@ -324,10 +324,13 @@ table{overflow-x:auto;display:block}
 <div class="form-grid">
 <div class="form-group"><label>实体ID</label><input type="text" id="new-iss-entity-id" placeholder="输入实体ID（可选）"></div>
 <div class="form-group"><label>Issuing Tier</label><select id="new-iss-issuing-tier"><option value="TIER_1_AGGREGATOR">TIER_1_AGGREGATOR</option><option value="TIER_2_DIRECT">TIER_2_DIRECT</option></select></div>
-<div class="form-group"><label>Funding Mode</label><select id="new-iss-funding-mode"><option value="CRYPTO_DESENSITIZED">CRYPTO_DESENSITIZED</option><option value="FIAT_DIRECT">FIAT_DIRECT</option></select></div>
+<div class="form-group"><label>Funding Mode</label><select id="new-iss-funding-mode" onchange="syncTierFundingGuard()"><option value="CRYPTO_DESENSITIZED">加密资产清算大仓（Crypto Pool）</option><option value="FIAT_DIRECT">法币直充</option></select></div>
+<div class="form-group" id="fiat-direct-panel"><label>法币直充状态</label><input type="text" value="可按卡池策略启用" disabled></div>
+<div class="form-group" id="crypto-pool-panel"><label>合规隔离资金池</label><input type="text" value="Crypto Pool" disabled></div>
 <div class="form-group"><label>Provider Code</label><input type="text" id="new-iss-provider-code" placeholder="如: checkout_com"></div>
 <div class="form-group"><label>Pool Code</label><input type="text" id="new-iss-pool-code" placeholder="如: usd_pool_001"></div>
 <div class="form-group"><label>Credential Vault Key</label><input type="text" id="new-iss-vault-key" placeholder="vault://..."></div>
+<div class="form-group"><label>BIN 码健康滑块</label><input type="range" id="new-iss-decline-limit" min="1" max="20" value="5" oninput="document.getElementById('new-iss-decline-limit-value').innerText=this.value"><small>最大拒绝次数：<span id="new-iss-decline-limit-value">5</span></small></div>
 </div>
 <button class="submit-btn" onclick="createIssuingPool()">创建卡池</button>
 </div>
@@ -431,7 +434,11 @@ function reloadIssuingPool(id){authFetch(API_BASE+'/api/v3/issuing/pools/'+id+'/
 
 // V3 Tab 初始化函数
 function initV3Tabs(){if(document.getElementById('tab-channel-risk').classList.contains('active'))loadChannelRiskConfig();if(document.getElementById('tab-merchant-reserve').classList.contains('active')){loadMerchantRiskProfiles();loadRollingReserves();}if(document.getElementById('tab-fee-allocation').classList.contains('active'))loadFeeAllocations();if(document.getElementById('tab-pipeline-isolation').classList.contains('active'))loadIsolationGroups();if(document.getElementById('tab-compliance-rfi').classList.contains('active'))loadRFIDocuments();}
-loadStats();
+function syncTierFundingGuard(){var tier=document.getElementById('new-acq-provider-tier');var funding=document.getElementById('new-iss-funding-mode');var fiat=document.getElementById('fiat-direct-panel');var crypto=document.getElementById('crypto-pool-panel');var tip=document.getElementById('tier-funding-tooltip');if(!tier||!funding)return;var fiatOpt=Array.from(funding.options).find(function(o){return o.value==='FIAT_DIRECT';});if(tier.value==='TIER_1_HIGH_RISK'){funding.value='CRYPTO_DESENSITIZED';if(fiatOpt)fiatOpt.disabled=true;if(fiat)fiat.style.display='none';if(crypto)crypto.style.display='block';if(tip){tip.innerText='高风险资金已强制进入异步合规隔离路径，法币直充已关闭。';tip.className='empty warn';}}else{if(fiatOpt)fiatOpt.disabled=false;if(fiat)fiat.style.display=funding.value==='FIAT_DIRECT'?'block':'none';if(crypto)crypto.style.display=funding.value==='CRYPTO_DESENSITIZED'?'block':'none';if(tip){tip.innerText='合规通道可按卡池策略选择充值路径。';tip.className='empty';}}}
+function triggerSystemLockdown(){if(!confirm('确认启动系统紧急全盘锁死？该操作会禁用所有收单通道并冻结隔离组。'))return;var operator=prompt('请输入操作人:','admin');if(!operator)return;var reason=prompt('请输入锁死原因:');if(!reason)return;authFetch(API_BASE+'/api/v3/system/lockdown',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operator:operator,reason:reason})}).then(function(r){return r.json().then(function(d){if(r.ok){alert('系统已进入 Fail-Closed 锁死状态。已禁用通道：'+d.disabled_channels);loadAcquirerChannels();loadIsolationGroups();}else{alert('锁死失败: '+errMsg(d));}});}).catch(function(e){alert('锁死失败: '+errMsg(e));});}
+function startAdminEventStream(){if(!window.EventSource)return;var es=new EventSource(API_BASE+'/api/v3/events/stream');es.addEventListener('SYSTEM_LOCKDOWN',function(e){alert('系统已锁死: '+e.data);});es.addEventListener('ISSUING_POOL_FRAUD_TRIPPED',function(e){alert('虚拟卡池熔断: '+e.data);});}
+function createIssuingPool(){syncTierFundingGuard();var entityID=document.getElementById('new-iss-entity-id').value;var issuingTier=document.getElementById('new-iss-issuing-tier').value;var fundingMode=document.getElementById('new-iss-funding-mode').value;var providerCode=document.getElementById('new-iss-provider-code').value;var poolCode=document.getElementById('new-iss-pool-code').value;var vaultKey=document.getElementById('new-iss-vault-key').value;var declineLimit=parseInt(document.getElementById('new-iss-decline-limit').value)||5;if(document.getElementById('new-acq-provider-tier').value==='TIER_1_HIGH_RISK'&&fundingMode==='FIAT_DIRECT'){alert('高风险通道禁止选择法币直充，系统已启用合规隔离路径。');syncTierFundingGuard();return;}if(!providerCode||!poolCode||!vaultKey){alert('请填写完整信息');return;}authFetch(API_BASE+'/api/v3/issuing/pools',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entity_id:entityID,issuing_tier:issuingTier,funding_mode:fundingMode,provider_code:providerCode,pool_code:poolCode,credential_vault_key:vaultKey,provider_config:{},velocity_config:{declined_count_sliding_window:declineLimit}})}).then(function(r){if(r.ok){document.getElementById('new-iss-entity-id').value='';document.getElementById('new-iss-provider-code').value='';document.getElementById('new-iss-pool-code').value='';document.getElementById('new-iss-vault-key').value='';document.getElementById('new-iss-funding-mode').value='FIAT_DIRECT';loadIssuingPools();syncTierFundingGuard();}else{r.json().then(function(d){alert('创建失败: '+errMsg(d));});}}).catch(function(e){alert('创建失败: '+errMsg(e));});}
+syncTierFundingGuard();startAdminEventStream();loadStats();
 </script>
 </body>
 </html>`

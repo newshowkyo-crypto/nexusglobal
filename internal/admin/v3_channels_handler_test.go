@@ -166,3 +166,47 @@ func TestV3ChannelsHandler_EnableDisableReload(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "reload_triggered", resp["status"])
 }
+
+func TestV3ChannelsHandler_ListChannels_NoCredentialEcho(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	pool, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	entityID := uuid.New()
+	tenantID := uuid.New()
+	channelID := uuid.New()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO corporate_entity (id, tenant_id, name, legal_name, country, jurisdiction, status)
+		 VALUES ($1, $2, 'Entity V3 Secret', 'Entity V3 Secret LLC', 'US', 'US-DE', 'ACTIVE')`,
+		entityID, tenantID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO acquirer_channels (
+			id, entity_id, provider_tier, provider_code, channel_code, credential_vault_key, strategy_mode, provider_config, routing_config
+		 ) VALUES ($1, $2, 'TIER_2_COMPLIANT', 'test-provider', 'secret-channel', 'vault://top-secret', 'DEFAULT', $3::jsonb, $4::jsonb)`,
+		channelID,
+		entityID,
+		`{"api_key":"plain-api-key","nested":{"webhook_secret":"plain-webhook-secret"},"region":"us"}`,
+		`{"kms_key":"plain-kms-key","priority":1}`,
+	)
+	require.NoError(t, err)
+
+	handler := NewV3ChannelsHandler(pool, nil)
+	req, rec := makeRequest(http.MethodGet, "/admin/api/v3/channels", nil)
+	handler.ListChannels(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.NotContains(t, body, "credential_vault_key")
+	assert.NotContains(t, body, "vault://top-secret")
+	assert.NotContains(t, body, "plain-api-key")
+	assert.NotContains(t, body, "plain-webhook-secret")
+	assert.NotContains(t, body, "plain-kms-key")
+	assert.Contains(t, body, `"has_credential":true`)
+	assert.Contains(t, body, `"api_key":"***"`)
+	assert.Contains(t, body, `"webhook_secret":"***"`)
+	assert.Contains(t, body, `"kms_key":"***"`)
+}
