@@ -80,6 +80,9 @@ type Transaction struct {
 	AggregateID     string          // 聚合ID
 	Description     string          // 描述
 	Entries         []Entry         // 交易条目（向后兼容）
+	// UpdateBalances 为 true 时，PostTransaction 在写分录后同步更新 account_balance。
+	// 默认 false，保持历史调用方（webhook consumer 等）的既有行为不变。
+	UpdateBalances bool
 }
 
 // LedgerEntry 账本条目
@@ -179,10 +182,12 @@ var (
 	ErrInvalidTransactionType = errors.New("ledger: invalid transaction type")
 	ErrTransactionNotFound    = errors.New("ledger: transaction not found")
 	ErrRequiresApproval       = errors.New("ledger: transaction requires approval")
-	ErrImbalanced             = errors.New("ledger: entries not balanced") // V3: 借贷不平衡
-	ErrZeroAmount             = errors.New("ledger: zero amount")          // V3: 金额为零
-	ErrInvalidDirection       = errors.New("ledger: invalid direction")    // V3: 无效方向
-	ErrNoEntries              = errors.New("ledger: no entries")           // V3: 无条目
+	ErrImbalanced             = errors.New("ledger: entries not balanced")     // V3: 借贷不平衡
+	ErrZeroAmount             = errors.New("ledger: zero amount")              // V3: 金额为零
+	ErrInvalidDirection       = errors.New("ledger: invalid direction")        // V3: 无效方向
+	ErrNoEntries              = errors.New("ledger: no entries")               // V3: 无条目
+	ErrIllegalTransition      = errors.New("ledger: illegal state transition") // P0-7: 非法状态转换
+	ErrIdempotencyConflict    = errors.New("ledger: idempotency key reused with different payload")
 )
 
 // AccountType 账户类型

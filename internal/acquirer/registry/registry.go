@@ -48,10 +48,14 @@ type AcquirerRepository interface {
 	EnableChannel(ctx context.Context, channelID uuid.UUID) error
 	ListChannelsByTier(ctx context.Context, entityID uuid.UUID, tier domain.ProviderTier) ([]domain.AcquirerChannel, error)
 	GetAcquirerChannelByID(ctx context.Context, id uuid.UUID) (*domain.AcquirerChannel, error)
+	// P0-B2: 按商户和币种筛选活跃通道（通道路由）
+	ListActiveChannelsByMerchantAndCurrency(ctx context.Context, merchantID uuid.UUID, currency string) ([]domain.TenantAcquirerChannel, error)
+	// P0-1: 获取商户权威路由策略
+	GetMerchantRoutingPolicy(ctx context.Context, merchantID uuid.UUID) (*domain.MerchantRoutingPolicy, error)
 }
 
 type AcquirerAdapterFactory interface {
-	Create(ctx context.Context, providerCode string, credential string, config map[string]any) (domain.AcquirerAdapter, error)
+	Create(ctx context.Context, providerCode string, credentials map[domain.CredentialType]string, config map[string]any) (domain.AcquirerAdapter, error)
 }
 
 type FailMode string
@@ -95,10 +99,24 @@ func NewChannelRegistry(cfg RegistryConfig) *ChannelRegistry {
 }
 
 func (r *ChannelRegistry) LoadAll(ctx context.Context) error {
+	// P0-3: real mode 下必须注入 AcquirerAdapterFactory
+	if r.isRealMode && r.factory == nil {
+		return fmt.Errorf("acquirer registry: real mode requires AcquirerAdapterFactory, fail-closed")
+	}
+
 	channels, err := r.repo.ListAllActiveTenantAcquirerChannels(ctx)
 	if err != nil {
 		r.logger.Error("load all channels failed", "err", err)
 		return err
+	}
+
+	// P0-2: real mode 下检查未绑定的 active runtime channel
+	if r.isRealMode {
+		for _, channel := range channels {
+			if channel.AcquirerChannelID == nil {
+				return fmt.Errorf("acquirer registry: active runtime channel %s has no acquirer_channel_id binding, fail-closed", channel.ID)
+			}
+		}
 	}
 
 	for _, channel := range channels {
@@ -108,6 +126,9 @@ func (r *ChannelRegistry) LoadAll(ctx context.Context) error {
 				"channel_id", channel.ID,
 				"channel_code", channel.ChannelCode,
 				"err", err)
+			if r.isRealMode {
+				return fmt.Errorf("acquirer registry: load channel bundle failed in real mode, fail-closed: channel_id=%s err=%w", channel.ID, err)
+			}
 			continue
 		}
 
@@ -133,6 +154,14 @@ func (r *ChannelRegistry) LoadAll(ctx context.Context) error {
 }
 
 func (r *ChannelRegistry) Get(channelID uuid.UUID) (*domain.ClientBundle, error) {
+	// P0-5: BURN_MODE 的 bundle 不可用于路由，fail-closed
+	r.statusCacheMu.RLock()
+	status, ok := r.statusCache[channelID]
+	r.statusCacheMu.RUnlock()
+	if ok && status.IsBurnMode {
+		return nil, fmt.Errorf("acquirer registry: channel %s is in BURN_MODE, fail-closed", channelID)
+	}
+
 	r.mu.RLock()
 	bundle, ok := r.bundles[channelID]
 	r.mu.RUnlock()
@@ -193,6 +222,82 @@ func (r *ChannelRegistry) SelectByTier(ctx context.Context, entityID uuid.UUID, 
 	return activeChannels, nil
 }
 
+// SelectChannel 选择单一通道（兼容包装）。
+//
+// P1: 多通道匹配不再视为配置错误，而是取候选集第一个；
+// 真正的多候选择优由 internal/pool 的打分器负责。
+// 无匹配通道时返回 ErrChannelNotFound（Fail-Closed，不调用 Provider）。
+func (r *ChannelRegistry) SelectChannel(ctx context.Context, merchantID uuid.UUID, currency string, amountMinor int64) (*domain.TenantAcquirerChannel, error) {
+	candidates, err := r.SelectCandidates(ctx, merchantID, currency, amountMinor)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, domain.ErrChannelNotFound
+	}
+	if len(candidates) > 1 {
+		r.logger.Warn("multiple acquirer channels matched, using first candidate (pool should rank them)",
+			"merchant_id", merchantID, "currency", currency, "count", len(candidates))
+	}
+	return &candidates[0], nil
+}
+
+// SelectCandidates 返回该商户在该币种下可用的全部通道候选（P1）。
+//
+// 使用 MerchantRoutingPolicy 的 ProviderTier 精确匹配通道，不得接受 body/header/payload 指定 tier。
+// 候选集为空时返回空切片（调用方 fail-closed）。
+func (r *ChannelRegistry) SelectCandidates(ctx context.Context, merchantID uuid.UUID, currency string, amountMinor int64) ([]domain.TenantAcquirerChannel, error) {
+	// 1. 获取商户权威 tier policy
+	policy, err := r.repo.GetMerchantRoutingPolicy(ctx, merchantID)
+	if err != nil {
+		return nil, fmt.Errorf("acquirer registry: resolve merchant routing policy: %w", err)
+	}
+	if policy == nil {
+		return nil, fmt.Errorf("acquirer registry: no routing policy for merchant %s, fail-closed", merchantID)
+	}
+	if policy.Status != "ACTIVE" {
+		return nil, fmt.Errorf("acquirer registry: merchant %s policy status is %s, fail-closed", merchantID, policy.Status)
+	}
+	if err := policy.ProviderTier.Validate(); err != nil {
+		return nil, fmt.Errorf("acquirer registry: merchant %s policy tier invalid: %w", merchantID, err)
+	}
+
+	// 2. 从 DB 获取该 merchant 的、支持指定币种的活跃通道（INNER JOIN 已过滤未绑定和非 ACTIVE）
+	channels, err := r.repo.ListActiveChannelsByMerchantAndCurrency(ctx, merchantID, currency)
+	if err != nil {
+		return nil, fmt.Errorf("acquirer registry: list channels for merchant %s: %w", merchantID, err)
+	}
+
+	if len(channels) == 0 {
+		return nil, nil
+	}
+
+	// 3. 过滤：非 BURN_MODE、ProviderTier 与权威 policy 精确匹配
+	filtered := make([]domain.TenantAcquirerChannel, 0)
+	for _, ch := range channels {
+		if !ch.IsActive {
+			continue
+		}
+		if ch.ChannelConfig != nil {
+			if burnMode, ok := ch.ChannelConfig["burn_mode"].(bool); ok && burnMode {
+				r.logger.Warn("channel in BURN_MODE skipped for routing", "channel_id", ch.ID)
+				continue
+			}
+		}
+		// 精确匹配 tier：通道的 ProviderTier 必须与商户权威 policy 一致
+		if ch.ProviderTier != policy.ProviderTier {
+			r.logger.Warn("channel provider_tier does not match merchant policy, skipped",
+				"channel_id", ch.ID,
+				"channel_tier", ch.ProviderTier,
+				"policy_tier", policy.ProviderTier)
+			continue
+		}
+		filtered = append(filtered, ch)
+	}
+
+	return filtered, nil
+}
+
 func (r *ChannelRegistry) checkBurnMode(config map[string]any) bool {
 	if config == nil {
 		return false
@@ -204,6 +309,11 @@ func (r *ChannelRegistry) checkBurnMode(config map[string]any) bool {
 }
 
 func (r *ChannelRegistry) Reload(ctx context.Context, channelID uuid.UUID) error {
+	// P0-3: real mode 下必须注入 AcquirerAdapterFactory
+	if r.isRealMode && r.factory == nil {
+		return fmt.Errorf("acquirer registry: real mode requires AcquirerAdapterFactory, fail-closed")
+	}
+
 	channel, err := r.repo.GetTenantAcquirerChannelByID(ctx, channelID)
 	if err != nil {
 		return err
@@ -229,6 +339,11 @@ func (r *ChannelRegistry) Reload(ctx context.Context, channelID uuid.UUID) error
 		r.mu.Unlock()
 
 		return err
+	}
+
+	// P0-1: BURN_MODE 防御性检查 — 即使 DB is_active=true，BURN_MODE bundle 也不可用
+	if r.checkBurnMode(channel.ChannelConfig) {
+		bundle.IsActive = false
 	}
 
 	r.mu.Lock()
@@ -336,6 +451,7 @@ func (r *ChannelRegistry) loadBundle(ctx context.Context, channel domain.TenantA
 		ChannelCode:      channel.ChannelCode,
 		ProviderID:       provider.ID,
 		ProviderCode:     provider.ProviderCode,
+		MerchantID:       channel.MerchantID,
 		Client:           client,
 		Config:           channel.ChannelConfig,
 		IsolationGroupID: channel.IsolationGroupID,
@@ -348,15 +464,20 @@ func (r *ChannelRegistry) loadBundle(ctx context.Context, channel domain.TenantA
 
 func (r *ChannelRegistry) createClient(provider *domain.PaymentProvider, credentials map[domain.CredentialType]string, channelConfig map[string]any) (domain.AcquirerClient, error) {
 	if r.factory != nil {
-		secret := credentials[domain.CredentialTypeSecret]
-		if secret == "" {
-			secret = credentials[domain.CredentialTypeAPIKey]
+		// P0-2: real mode 下禁止 mock provider
+		if r.isRealMode && strings.ToLower(provider.ProviderCode) == "mock" {
+			return nil, domain.ErrProviderCodeUnregistered
 		}
-		adapter, err := r.factory.Create(context.Background(), provider.ProviderCode, secret, channelConfig)
+		adapter, err := r.factory.Create(context.Background(), provider.ProviderCode, credentials, channelConfig)
 		if err != nil {
 			return nil, err
 		}
 		return &adapterWrapper{adapter: adapter}, nil
+	}
+
+	// P0-3: real mode 下禁止 createClientLegacy
+	if r.isRealMode {
+		return nil, fmt.Errorf("acquirer registry: real mode requires AcquirerAdapterFactory, fail-closed")
 	}
 
 	return r.createClientLegacy(provider, credentials, channelConfig)
@@ -376,14 +497,9 @@ func (r *ChannelRegistry) createClientLegacy(provider *domain.PaymentProvider, c
 		return r.createNxtapayClient(credentials, channelConfig)
 
 	default:
-		if r.isRealMode {
-			r.logger.Error("unsupported provider code in real mode, fail-closed",
-				"provider_code", provider.ProviderCode)
-			return nil, domain.ErrProviderCodeUnregistered
-		}
-		r.logger.Warn("unsupported provider code, falling back to mock",
-			"provider_code", provider.ProviderCode)
-		return r.createMockClient(webhookSecret, channelConfig)
+		// P0-3: 禁止 unknown provider 自动降级 mock，所有模式都返回错误
+		r.logger.Error("unsupported provider code", "provider_code", provider.ProviderCode)
+		return nil, domain.ErrProviderCodeUnregistered
 	}
 }
 
@@ -584,4 +700,36 @@ func (r *ChannelRegistry) ListAll() []*domain.ChannelSummary {
 		})
 	}
 	return summaries
+}
+
+// AdapterConstructor 是 provider adapter 的构造器函数。
+type AdapterConstructor func(credentials map[domain.CredentialType]string, config map[string]any) (domain.AcquirerAdapter, error)
+
+// DefaultAdapterFactory 是基于注册的 AcquirerAdapterFactory 实现。
+// provider 的具体逻辑由注册的构造器持有，不散回 Registry。
+type DefaultAdapterFactory struct {
+	constructors map[string]AdapterConstructor
+	logger       *slog.Logger
+}
+
+func NewDefaultAdapterFactory(logger *slog.Logger) *DefaultAdapterFactory {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &DefaultAdapterFactory{
+		constructors: make(map[string]AdapterConstructor),
+		logger:       logger,
+	}
+}
+
+func (f *DefaultAdapterFactory) Register(providerCode string, constructor AdapterConstructor) {
+	f.constructors[strings.ToLower(providerCode)] = constructor
+}
+
+func (f *DefaultAdapterFactory) Create(ctx context.Context, providerCode string, credentials map[domain.CredentialType]string, config map[string]any) (domain.AcquirerAdapter, error) {
+	constructor, ok := f.constructors[strings.ToLower(providerCode)]
+	if !ok {
+		return nil, domain.ErrProviderCodeUnregistered
+	}
+	return constructor(credentials, config)
 }

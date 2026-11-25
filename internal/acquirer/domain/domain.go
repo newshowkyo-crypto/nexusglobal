@@ -201,6 +201,18 @@ type TenantAcquirerChannel struct {
 	Version          int
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	// 从 acquirer_channels 表 JOIN 获取
+	ProviderTier      ProviderTier // 通道的 provider_tier
+	AcquirerChannelID *uuid.UUID   // 指向 acquirer_channels.id，建立控制面/运行时绑定关系
+}
+
+// MerchantRoutingPolicy 是商户的权威路由策略，从数据库读取。
+// SelectChannel 必须使用此 policy 的 ProviderTier 精确匹配通道，不得接受 body/header/payload 指定 tier。
+type MerchantRoutingPolicy struct {
+	MerchantID   uuid.UUID
+	ProviderTier ProviderTier
+	Status       string // ACTIVE, INACTIVE
+	Version      int
 }
 
 type ProviderCredentialVault struct {
@@ -221,6 +233,7 @@ type ClientBundle struct {
 	ChannelCode      string
 	ProviderID       uuid.UUID
 	ProviderCode     string
+	MerchantID       uuid.UUID // P0-3: 通道所属商户 ID，用于 AcquirerGateway 校验通道归属
 	Client           AcquirerClient
 	Config           map[string]any
 	IsolationGroupID *uuid.UUID

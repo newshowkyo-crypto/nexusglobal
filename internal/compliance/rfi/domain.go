@@ -32,21 +32,21 @@ const (
 
 // RFIDocument RFI 合规文档
 type RFIDocument struct {
-	ID             uuid.UUID
-	OrderID        uuid.UUID
-	MerchantID     uuid.UUID
-	DocumentType   DocumentType
-	SourceDataHash string
-	Status         DocumentStatus
-	PDFContent     []byte
-	Metadata       map[string]interface{}
-	ApprovedBy     string
-	ApprovedAt     *time.Time
-	RejectedBy     string
-	RejectedAt     *time.Time
-	RejectedReason string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              uuid.UUID
+	OrderID         uuid.UUID
+	MerchantID      uuid.UUID
+	DocumentType    DocumentType
+	SourceDataHash  string
+	Status          DocumentStatus
+	DocumentPayload []byte
+	Metadata        map[string]interface{}
+	ApprovedBy      string
+	ApprovedAt      *time.Time
+	RejectedBy      string
+	RejectedAt      *time.Time
+	RejectedReason  string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // OrderSourceData 订单源数据

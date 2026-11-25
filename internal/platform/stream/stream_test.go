@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -17,7 +18,16 @@ import (
 
 func setupRedis(t *testing.T) (*redis.Client, func()) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping testcontainers test in short mode")
+	}
 	ctx := context.Background()
+	// OPS-007: 外部共享 Redis 优先（TEST_REDIS_ADDR），testcontainers 兜底。
+	if addr := os.Getenv("TEST_REDIS_ADDR"); addr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: addr})
+		require.NoError(t, rdb.Ping(ctx).Err(), "ping external TEST_REDIS_ADDR")
+		return rdb, func() { _ = rdb.Close() }
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "redis:7",

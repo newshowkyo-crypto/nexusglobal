@@ -3,6 +3,9 @@ package config
 import (
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoad_ProductionRejectsMockProviders(t *testing.T) {
@@ -143,6 +146,31 @@ func TestLoad_ProductionRejectsMockProviders(t *testing.T) {
 			},
 			expectError:    true,
 			expectedErrMsg: "VCC_FUNDING_PROVIDER=mock is not allowed in production",
+		},
+		{
+			name: "production rejects VCC_FUNDING_PROVIDER=local",
+			envVars: map[string]string{
+				"APP_ENV":                 "production",
+				"KMS_MODE":                "real",
+				"EXTERNAL_MODE":           "real",
+				"LP_BASE_URL":             "https://lp.example.com",
+				"BANK_BASE_URL":           "https://bank.example.com",
+				"MAE_BASE_URL":            "https://mae.example.com",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "local",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+				"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+				"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+				"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+				"VAULT_BASE_URL":          "https://vault.example.com",
+				"VAULT_TOKEN":             "vault_token",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expectError:    true,
+			expectedErrMsg: "VCC_FUNDING_PROVIDER=local is not allowed in production",
 		},
 		{
 			name: "production rejects CHECKOUT_ORDER_PROVIDER=mock",
@@ -349,6 +377,22 @@ func TestLoad_LocalAllowsMockProviders(t *testing.T) {
 			},
 			expected: true,
 		},
+		{
+			name: "local allows VCC_FUNDING_PROVIDER=local",
+			envVars: map[string]string{
+				"APP_ENV":                 "local",
+				"KMS_MODE":                "mock",
+				"EXTERNAL_MODE":           "mock",
+				"ACQUIRER_MODE":           "mock",
+				"ACQUIRER_PROVIDER":       "mock",
+				"ISSUING_PROVIDER":        "mock",
+				"VCC_FUNDING_PROVIDER":    "local",
+				"CHECKOUT_ORDER_PROVIDER": "mock",
+				"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+				"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+			},
+			expected: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -439,15 +483,28 @@ func TestIsMockMode(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "all mock providers returns true",
+			name: "any mock provider returns true",
 			envVars: map[string]string{
-				"EXTERNAL_MODE":           "mock",
-				"KMS_MODE":                "mock",
-				"ACQUIRER_MODE":           "mock",
-				"ACQUIRER_PROVIDER":       "mock",
+				"EXTERNAL_MODE":           "real",
+				"KMS_MODE":                "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
 				"ISSUING_PROVIDER":        "mock",
 				"VCC_FUNDING_PROVIDER":    "mock",
-				"CHECKOUT_ORDER_PROVIDER": "mock",
+				"CHECKOUT_ORDER_PROVIDER": "http",
+			},
+			expected: true,
+		},
+		{
+			name: "VCC_FUNDING_PROVIDER=local returns true",
+			envVars: map[string]string{
+				"EXTERNAL_MODE":           "real",
+				"KMS_MODE":                "real",
+				"ACQUIRER_MODE":           "real",
+				"ACQUIRER_PROVIDER":       "stripe",
+				"ISSUING_PROVIDER":        "real_provider",
+				"VCC_FUNDING_PROVIDER":    "local",
+				"CHECKOUT_ORDER_PROVIDER": "http",
 			},
 			expected: true,
 		},
@@ -485,4 +542,112 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ── R25 A1: WEBHOOK_SIGNING_KEY production 校验测试 ──
+
+func TestProductionConfigRequiresWebhookSigningKey(t *testing.T) {
+	oldEnv := setTestEnv(map[string]string{
+		"APP_ENV":                 "production",
+		"KMS_MODE":                "real",
+		"EXTERNAL_MODE":           "real",
+		"LP_BASE_URL":             "https://lp.example.com",
+		"BANK_BASE_URL":           "https://bank.example.com",
+		"MAE_BASE_URL":            "https://mae.example.com",
+		"ACQUIRER_MODE":           "real",
+		"ACQUIRER_PROVIDER":       "stripe",
+		"ISSUING_PROVIDER":        "real_provider",
+		"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+		"CHECKOUT_ORDER_PROVIDER": "http",
+		"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+		"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+		"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+		"VAULT_BASE_URL":          "https://vault.example.com",
+		"VAULT_TOKEN":             "vault_token",
+		"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+		"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+		"WEBHOOK_SIGNING_KEY":     "",
+	})
+	defer restoreEnv(oldEnv)
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WEBHOOK_SIGNING_KEY is required in production")
+}
+
+func TestProductionConfigRejectsShortWebhookSigningKey(t *testing.T) {
+	oldEnv := setTestEnv(map[string]string{
+		"APP_ENV":                 "production",
+		"KMS_MODE":                "real",
+		"EXTERNAL_MODE":           "real",
+		"LP_BASE_URL":             "https://lp.example.com",
+		"BANK_BASE_URL":           "https://bank.example.com",
+		"MAE_BASE_URL":            "https://mae.example.com",
+		"ACQUIRER_MODE":           "real",
+		"ACQUIRER_PROVIDER":       "stripe",
+		"ISSUING_PROVIDER":        "real_provider",
+		"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+		"CHECKOUT_ORDER_PROVIDER": "http",
+		"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+		"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+		"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+		"VAULT_BASE_URL":          "https://vault.example.com",
+		"VAULT_TOKEN":             "vault_token",
+		"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+		"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+		"WEBHOOK_SIGNING_KEY":     "short_key_only_15_bytes",
+	})
+	defer restoreEnv(oldEnv)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for short WEBHOOK_SIGNING_KEY, got nil")
+	}
+	assert.Contains(t, err.Error(), "WEBHOOK_SIGNING_KEY must be at least 32 bytes")
+}
+
+func TestProductionConfigAcceptsValidWebhookSigningKey(t *testing.T) {
+	oldEnv := setTestEnv(map[string]string{
+		"APP_ENV":                 "production",
+		"KMS_MODE":                "real",
+		"EXTERNAL_MODE":           "real",
+		"LP_BASE_URL":             "https://lp.example.com",
+		"BANK_BASE_URL":           "https://bank.example.com",
+		"MAE_BASE_URL":            "https://mae.example.com",
+		"ACQUIRER_MODE":           "real",
+		"ACQUIRER_PROVIDER":       "stripe",
+		"ISSUING_PROVIDER":        "real_provider",
+		"VCC_FUNDING_PROVIDER":    "crypto_bridge",
+		"CHECKOUT_ORDER_PROVIDER": "http",
+		"JWT_SECRET":              "a_very_long_secret_key_that_is_at_least_32_bytes",
+		"INTERNAL_TOKEN":          "a_very_long_internal_token_that_is_at_least_32_bytes",
+		"ADMIN_SESSION_SECRET":    "a_very_long_admin_secret_that_is_at_least_32_bytes",
+		"VAULT_BASE_URL":          "https://vault.example.com",
+		"VAULT_TOKEN":             "vault_token",
+		"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+		"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+		"WEBHOOK_SIGNING_KEY":     "a_very_long_webhook_signing_key_that_is_at_least_32_bytes",
+	})
+	defer restoreEnv(oldEnv)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+	assert.Equal(t, "a_very_long_webhook_signing_key_that_is_at_least_32_bytes", cfg.WebhookSigningKey)
+}
+
+// setTestEnv sets environment variables for testing and returns the old values for restoration.
+func setTestEnv(vars map[string]string) map[string]string {
+	old := make(map[string]string)
+	for k, v := range vars {
+		old[k] = os.Getenv(k)
+		os.Setenv(k, v)
+	}
+	return old
+}
+
+func restoreEnv(old map[string]string) {
+	for k, v := range old {
+		os.Setenv(k, v)
+	}
 }

@@ -82,11 +82,22 @@ curl -X POST http://localhost:8080/api/checkout/token \
 # 3. Validate token via API
 curl http://localhost:8080/api/checkout/validate?token=<token_value>
 
-# 4. Process payment
+# 4. Process payment (PAY-001: raw card data is NOT accepted — the checkout
+#    page never collects PAN/CVV. Card data must be tokenized by the PSP's
+#    Hosted Fields / SDK and submitted as payment_method_token.)
 curl -X POST http://localhost:8080/api/checkout/charge \
   -H "Content-Type: application/json" \
-  -d '{"token": "<token_value>", "card_number": "4242424242424242", "card_expiry": "12/25", "card_cvv": "123"}'
+  -d '{"token": "<token_value>", "payment_method_token": "<psp_token>"}'
 ```
+
+> **Note (PAY-002):** `success_url` / `cancel_url` used by Checkout Sessions and
+> Payment Links must be HTTPS and their hosts must be registered in the
+> per-merchant allowlist (`merchant_return_url_allowlist`, migration 000053).
+> Unregistered hosts are rejected with `RETURN_URL_NOT_ALLOWED` (fail-closed).
+>
+> **Note (PAY-003):** `GET /checkout/v3/{session_id}` and `GET /pay/{token}`
+> return a real HTML status page (active/success/declined/expired/used/unknown)
+> to browsers (`Accept: text/html`); API clients still receive JSON.
 
 ### Mock Payment Gateway Scenarios
 
@@ -106,7 +117,7 @@ Example:
 # Success scenario
 curl -X POST http://localhost:8080/api/checkout/charge \
   -H "Content-Type: application/json" \
-  -d '{"token": "<token>", "card_number": "4242424242424242", "card_expiry": "12/25", "card_cvv": "123"}'
+  -d '{"token": "<token>", "payment_method_token": "<psp_token>"}'
 
 # Failure scenario (create token with order_id=order_fail first)
 curl -X POST http://localhost:8080/api/checkout/token \
@@ -229,7 +240,7 @@ make redlines     # CONSTRAINTS.md redline verification
 
 ## Architecture
 
-- Go 1.22+ modular monolith
+- Go 1.25.0 modular monolith
 - PostgreSQL 15 (pgx/v5 + sqlc)
 - Redis 7 (Streams MQ)
 - Zero external network dependencies in dev/CI (all mocked)

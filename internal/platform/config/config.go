@@ -9,17 +9,20 @@ import (
 )
 
 type Config struct {
-	AppEnv                  string        `env:"APP_ENV" envDefault:"local"`
-	HTTPAddr                string        `env:"HTTP_ADDR" envDefault:":8080"`
-	PostgresDSN             string        `env:"POSTGRES_DSN,required"`
-	RedisAddr               string        `env:"REDIS_ADDR" envDefault:"localhost:6379"`
-	ExternalMode            string        `env:"EXTERNAL_MODE" envDefault:"mock"`
-	KMSMode                 string        `env:"KMS_MODE" envDefault:"mock"`
-	AcquirerMode            string        `env:"ACQUIRER_MODE" envDefault:"mock"`
-	AcquirerProvider        string        `env:"ACQUIRER_PROVIDER" envDefault:"mock"`
-	IssuingProvider         string        `env:"ISSUING_PROVIDER" envDefault:"mock"`
-	VCCFundingProvider      string        `env:"VCC_FUNDING_PROVIDER" envDefault:"mock"`
-	CheckoutOrderProvider   string        `env:"CHECKOUT_ORDER_PROVIDER" envDefault:"mock"`
+	AppEnv                string `env:"APP_ENV" envDefault:"local"`
+	HTTPAddr              string `env:"HTTP_ADDR" envDefault:":8080"`
+	PostgresDSN           string `env:"POSTGRES_DSN,required"`
+	RedisAddr             string `env:"REDIS_ADDR" envDefault:"localhost:6379"`
+	ExternalMode          string `env:"EXTERNAL_MODE" envDefault:"mock"`
+	KMSMode               string `env:"KMS_MODE" envDefault:"mock"`
+	AcquirerMode          string `env:"ACQUIRER_MODE" envDefault:"mock"`
+	AcquirerProvider      string `env:"ACQUIRER_PROVIDER" envDefault:"mock"`
+	IssuingProvider       string `env:"ISSUING_PROVIDER" envDefault:"mock"`
+	VCCFundingProvider    string `env:"VCC_FUNDING_PROVIDER" envDefault:"mock"`
+	CheckoutOrderProvider string `env:"CHECKOUT_ORDER_PROVIDER" envDefault:"mock"`
+	CheckoutOrderAPIURL   string `env:"CHECKOUT_ORDER_API_URL" envDefault:""`
+	// PoolMode 支付池模式：off / shadow / enforce。默认 shadow（只记录决策不切流量）。
+	PoolMode                string        `env:"POOL_MODE" envDefault:"shadow"`
 	MasterKeyBase64         string        `env:"MASTER_KEY_BASE64,required"`
 	JWTSecret               string        `env:"JWT_SECRET" envDefault:""`
 	InternalToken           string        `env:"INTERNAL_TOKEN" envDefault:""`
@@ -46,6 +49,23 @@ type Config struct {
 	OTelCollectorURL        string        `env:"OTEL_COLLECTOR_URL" envDefault:""`
 	OTelSampleRatio         float64       `env:"OTEL_SAMPLE_RATIO" envDefault:"1.0"`
 	TokenStore              string        `env:"TOKEN_STORE" envDefault:"memory"`
+	CheckoutPublicBaseURL   string        `env:"CHECKOUT_PUBLIC_BASE_URL" envDefault:"http://localhost:8080"`
+	// RateLimitFailClosed 控制限流器 Redis 故障行为。
+	// true（生产默认）：Redis 故障时拒绝所有限流请求（503 RATE_LIMITER_FAIL_CLOSED）。
+	// false（local 默认）：Redis 故障时放行。
+	RateLimitFailClosed bool `env:"RATE_LIMIT_FAIL_CLOSED" envDefault:"true"`
+	// WebhookSigningKey Unified Webhook Receiver 的 HMAC-SHA256 签名密钥（P0-5）。
+	// B7: 只用于 HMAC 验签，不用于加密。
+	// 生产环境必须配置（>=32 字节）。为空时 webhook receiver fail closed。
+	WebhookSigningKey string `env:"WEBHOOK_SIGNING_KEY" envDefault:""`
+	// StatementSigningKey 对账单签名下载密钥（HMAC-SHA256）。
+	// 为空时回退 WEBHOOK_SIGNING_KEY；两者都为空则不开放签名下载。
+	StatementSigningKey string `env:"STATEMENT_SIGNING_KEY" envDefault:""`
+	// WebhookPayloadKeyBase64 Webhook payload 加密密钥（B7）。
+	// 独立于 WEBHOOK_SIGNING_KEY，只用于 AES-256-GCM payload 加密/解密。
+	// local/mock 模式使用此 key 或 MASTER_KEY_BASE64 派生 AES key。
+	// production 模式必须通过 KMS/Envelope Encryptor，此 key 仅用于 local/mock。
+	WebhookPayloadKeyBase64 string `env:"WEBHOOK_PAYLOAD_KEY_BASE64" envDefault:""`
 }
 
 func Load() (*Config, error) {
@@ -89,6 +109,15 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: CHECKOUT_ORDER_PROVIDER must be one of: mock, http, disabled")
 	}
 
+	// G15: VCC_FUNDING_PROVIDER 白名单校验。
+	// 允许的值：disabled（不启动 worker）、mock（本地闭环测试，真实账本）、local（开发环境）。
+	// 任何其他值在启动时由 VCCAdapterFactory 返回 ErrUnsupportedCapability fail-closed。
+	// 此处仅做语法校验，capability 边界由 factory 在 worker 启动时强制。
+	if cfg.VCCFundingProvider != "disabled" && cfg.VCCFundingProvider != "mock" && cfg.VCCFundingProvider != "local" {
+		// 允许其他值通过配置校验，但会在 worker 启动时被 VCCAdapterFactory 拒绝。
+		// 这样可以在日志中清晰看到 UNSUPPORTED_CAPABILITY 错误，而不是配置解析错误。
+	}
+
 	return cfg, nil
 }
 
@@ -113,8 +142,16 @@ func validateProductionConfig(cfg *Config) error {
 		return fmt.Errorf("config: ISSUING_PROVIDER=mock is not allowed in production")
 	}
 
-	if cfg.VCCFundingProvider == "mock" {
-		return fmt.Errorf("config: VCC_FUNDING_PROVIDER=mock is not allowed in production")
+	if cfg.VCCFundingProvider == "mock" || cfg.VCCFundingProvider == "local" {
+		return fmt.Errorf("config: VCC_FUNDING_PROVIDER=%s is not allowed in production", cfg.VCCFundingProvider)
+	}
+
+	// P0-B1: production 只允许 disabled 或已注册的真实 Provider。
+	// mock/local 只能在 local/mock 环境运行。
+	// 未注册 Provider 在启动时由 VCCAdapterFactory 返回 ErrUnsupportedCapability fail-closed。
+	if cfg.VCCFundingProvider != "disabled" {
+		// 非 disabled 必须通过 VCCAdapterFactory 注册；
+		// 此处仅做语法校验，capability 边界由 factory 在 worker 启动时强制。
 	}
 
 	if cfg.CheckoutOrderProvider == "mock" {
@@ -165,6 +202,15 @@ func validateProductionConfig(cfg *Config) error {
 		return fmt.Errorf("config: DB_MIGRATION_MODE must be one of: auto, manual")
 	}
 
+	// R25 A1: WEBHOOK_SIGNING_KEY production 校验
+	// 不允许自动生成默认密钥，不允许回退到 MASTER_KEY_BASE64 充当签名密钥
+	if cfg.WebhookSigningKey == "" {
+		return fmt.Errorf("config: WEBHOOK_SIGNING_KEY is required in production")
+	}
+	if len(cfg.WebhookSigningKey) < 32 {
+		return fmt.Errorf("config: WEBHOOK_SIGNING_KEY must be at least 32 bytes in production (got %d)", len(cfg.WebhookSigningKey))
+	}
+
 	return nil
 }
 
@@ -176,5 +222,5 @@ func IsMockMode() bool {
 	return os.Getenv("EXTERNAL_MODE") == "mock" || os.Getenv("KMS_MODE") == "mock" ||
 		os.Getenv("ACQUIRER_MODE") == "mock" || os.Getenv("ACQUIRER_PROVIDER") == "mock" ||
 		os.Getenv("ISSUING_PROVIDER") == "mock" || os.Getenv("VCC_FUNDING_PROVIDER") == "mock" ||
-		os.Getenv("CHECKOUT_ORDER_PROVIDER") == "mock"
+		os.Getenv("VCC_FUNDING_PROVIDER") == "local" || os.Getenv("CHECKOUT_ORDER_PROVIDER") == "mock"
 }

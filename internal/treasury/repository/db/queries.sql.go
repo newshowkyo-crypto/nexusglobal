@@ -140,6 +140,32 @@ SELECT id, sweep_rule_id, source_account_id, target_account_id, amount_minor, cu
 WHERE id = $1
 `
 
+const getSweepTransferByKey = `-- name: GetSweepTransferByKey :one
+SELECT id, sweep_rule_id, source_account_id, target_account_id, amount_minor, currency, rail, status, idempotency_key, bank_ref, version, created_at, updated_at FROM sweep_transfer
+WHERE idempotency_key = $1
+`
+
+func (q *Queries) GetSweepTransferByKey(ctx context.Context, idempotencyKey string) (SweepTransfer, error) {
+	row := q.db.QueryRow(ctx, getSweepTransferByKey, idempotencyKey)
+	var i SweepTransfer
+	err := row.Scan(
+		&i.ID,
+		&i.SweepRuleID,
+		&i.SourceAccountID,
+		&i.TargetAccountID,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Rail,
+		&i.Status,
+		&i.IdempotencyKey,
+		&i.BankRef,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 func (q *Queries) GetSweepTransfer(ctx context.Context, id uuid.UUID) (SweepTransfer, error) {
 	row := q.db.QueryRow(ctx, getSweepTransfer, id)
 	var i SweepTransfer
@@ -450,6 +476,32 @@ const getSweepApproval = `-- name: GetSweepApproval :one
 SELECT id, sweep_rule_id, merchant_id, amount_minor, currency, rail, beneficiary_type, status, required_approvals, current_approvals, idempotency_key, created_at, updated_at FROM sweep_approval
 WHERE id = $1
 `
+
+const getSweepApprovalByKey = `-- name: GetSweepApprovalByKey :one
+SELECT id, sweep_rule_id, merchant_id, amount_minor, currency, rail, beneficiary_type, status, required_approvals, current_approvals, idempotency_key, created_at, updated_at FROM sweep_approval
+WHERE idempotency_key = $1
+`
+
+func (q *Queries) GetSweepApprovalByKey(ctx context.Context, idempotencyKey string) (SweepApproval, error) {
+	row := q.db.QueryRow(ctx, getSweepApprovalByKey, idempotencyKey)
+	var i SweepApproval
+	err := row.Scan(
+		&i.ID,
+		&i.SweepRuleID,
+		&i.MerchantID,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Rail,
+		&i.BeneficiaryType,
+		&i.Status,
+		&i.RequiredApprovals,
+		&i.CurrentApprovals,
+		&i.IdempotencyKey,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
 
 func (q *Queries) GetSweepApproval(ctx context.Context, id uuid.UUID) (SweepApproval, error) {
 	row := q.db.QueryRow(ctx, getSweepApproval, id)

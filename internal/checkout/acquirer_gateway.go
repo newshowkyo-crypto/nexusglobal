@@ -10,6 +10,7 @@ import (
 	"github.com/nexusglobal/mamr/internal/acquirer/domain"
 	"github.com/nexusglobal/mamr/internal/acquirer/registry"
 	"github.com/nexusglobal/mamr/internal/pipeline"
+	"github.com/nexusglobal/mamr/internal/platform/failclosed"
 )
 
 var (
@@ -32,6 +33,9 @@ type AcquirerGateway struct {
 	registry    *registry.ChannelRegistry
 	pipelineSvc *pipeline.Service
 	isReal      bool
+	// P0-2: failClosedSvc 用于 ExecutionCheck（Provider dispatch 前）。
+	// 若为 nil，回退到进程内缓存检查（IsSystemLockedDown）。
+	failClosedSvc *failclosed.Service
 }
 
 // NewAcquirerGateway 创建基于 ChannelRegistry 的支付网关
@@ -43,8 +47,64 @@ func NewAcquirerGateway(reg *registry.ChannelRegistry, pipelineSvc *pipeline.Ser
 	}
 }
 
+// NewAcquirerGatewayWithFailClosed 创建带 Fail-Closed 服务注入的 AcquirerGateway（P0-2）。
+//
+// 生产环境应使用此构造函数，确保 Provider dispatch 前经过 ExecutionCheck。
+// failClosedSvc != nil 时，Charge 会在调用 client.Authorize 前调用 ExecutionCheck(ctx)，
+// 封锁或 DB 错误时返回 ErrSystemLockdownFailClosed。
+func NewAcquirerGatewayWithFailClosed(reg *registry.ChannelRegistry, pipelineSvc *pipeline.Service, isReal bool, failClosedSvc *failclosed.Service) *AcquirerGateway {
+	return &AcquirerGateway{
+		registry:      reg,
+		pipelineSvc:   pipelineSvc,
+		isReal:        isReal,
+		failClosedSvc: failClosedSvc,
+	}
+}
+
+// SetFailClosedService 注入 Fail-Closed 服务（用于已构造的 AcquirerGateway）。
+func (g *AcquirerGateway) SetFailClosedService(svc *failclosed.Service) {
+	g.failClosedSvc = svc
+}
+
+// SetPipelineService 注入 Pipeline 隔离服务（P0-3）。
+//
+// 用于组合根在构造 AcquirerGateway 后注入 PipelineService，
+// 确保 frozen/RISK_HOLD/DISABLED 隔离组能阻断实际路由。
+// 不允许回退到 NoopRepository（G05 fail-closed）。
+func (g *AcquirerGateway) SetPipelineService(svc *pipeline.Service) {
+	g.pipelineSvc = svc
+}
+
+// PipelineService 返回注入的 Pipeline 服务（可能为 nil，用于测试）。
+func (g *AcquirerGateway) PipelineService() *pipeline.Service {
+	return g.pipelineSvc
+}
+
+// executionCheck 是 Provider dispatch 前的统一封锁检查（P0-2）。
+// 若 failClosedSvc 为 nil，回退到进程内缓存检查（向后兼容）。
+// 否则调用 ExecutionCheck(ctx)，封锁或 DB 错误时返回 ErrSystemLockdownFailClosed。
+func (g *AcquirerGateway) executionCheck(ctx context.Context) error {
+	if g.failClosedSvc != nil {
+		return g.failClosedSvc.ExecutionCheck(ctx)
+	}
+	// 回退：仅查进程内缓存（旧路径）
+	if failclosed.IsSystemLockedDown() {
+		return ErrSystemLockdownFailClosed
+	}
+	return nil
+}
+
 // Charge 调用 AcquirerClient.Authorize -> Capture
+//
+// P0-3: 只接受明确 AcquirerChannelID。uuid.Nil/未找到/通道不属于merchant/币种不匹配/通道禁用/配置歧义
+// 一律 fail-closed，绝不调用 Provider。
 func (g *AcquirerGateway) Charge(ctx context.Context, req PaymentRequest) (*PaymentResult, error) {
+	// P0-2: Provider dispatch 前强一致封锁检查。
+	// ExecutionCheck 查询 DB 持久状态，DB 错误时 fail-closed。
+	if err := g.executionCheck(ctx); err != nil {
+		return nil, ErrSystemLockdownFailClosed
+	}
+
 	// Real 模式必须拒绝 raw PAN/CVV
 	if g.isReal {
 		if req.CardNumber != "" || req.CardCVV != "" {
@@ -56,6 +116,11 @@ func (g *AcquirerGateway) Charge(ctx context.Context, req PaymentRequest) (*Paym
 		}
 	}
 
+	// P0-3: 只接受明确 AcquirerChannelID，uuid.Nil → fail-closed
+	if req.AcquirerChannelID == uuid.Nil {
+		return nil, ErrChannelNotFound
+	}
+
 	// 解析 merchant ID（防止 panic）
 	var merchantUUID uuid.UUID
 	var err error
@@ -65,25 +130,42 @@ func (g *AcquirerGateway) Charge(ctx context.Context, req PaymentRequest) (*Paym
 			return nil, fmt.Errorf("%w: %v", ErrMerchantIDInvalid, err)
 		}
 	} else {
-		// 使用默认 merchant ID 用于演示
-		merchantUUID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
+		// P0-3: 无 merchant ID → fail-closed，不再使用默认回退
+		return nil, ErrMerchantIDInvalid
 	}
 
-	// 获取 channel ID（从 OrderID 解析或使用默认 channel）
-	channelID := g.channelIDFromOrder(req.OrderID)
-
 	// 从 registry 获取 client bundle
-	bundle, err := g.registry.Get(channelID)
+	bundle, err := g.registry.Get(req.AcquirerChannelID)
 	if err != nil {
-		if errors.Is(err, domain.ErrChannelNotFound) {
-			return nil, ErrChannelNotFound
-		}
-		return nil, fmt.Errorf("acquirer gateway: get channel: %w", err)
+		// P0-3: 通道未找到 → fail-closed
+		return nil, ErrChannelNotFound
 	}
 
 	// 检查通道是否激活
 	if !bundle.IsActive {
 		return nil, ErrChannelDisabled
+	}
+
+	// P0-3: 校验 merchant 归属 — req.MerchantID 必须与 bundle 的 MerchantID 一致
+	if bundle.MerchantID != merchantUUID {
+		return nil, ErrChannelNotFound // fail-closed：跨商户错路由
+	}
+
+	// P0-3: 校验币种 — 通道必须支持请求的币种
+	// 从 bundle.Config 检查 currencies 配置
+	if bundle.Config != nil {
+		if currencies, ok := bundle.Config["currencies"].([]interface{}); ok {
+			currencyMatched := false
+			for _, c := range currencies {
+				if fmt.Sprintf("%v", c) == req.Currency {
+					currencyMatched = true
+					break
+				}
+			}
+			if !currencyMatched {
+				return nil, ErrChannelNotFound // fail-closed：币种不匹配
+			}
+		}
 	}
 
 	// 检查管道隔离组状态（如果配置了）
@@ -104,14 +186,17 @@ func (g *AcquirerGateway) Charge(ctx context.Context, req PaymentRequest) (*Paym
 	}
 
 	// 构建 Authorize 请求
+	// B3: 传递 ProviderIdempotencyKey 到底层 AcquirerClient
 	authReq := domain.AuthorizeRequest{
 		OrderID:            req.OrderID,
 		MerchantID:         merchantUUID,
+		ChannelID:          req.AcquirerChannelID,
 		Amount:             req.Amount,
 		Currency:           req.Currency,
 		BuyerIP:            req.BuyerIP,
 		CardBIN:            req.CardBIN,
 		PaymentMethodToken: req.PaymentMethodToken,
+		IdempotencyKey:     req.ProviderIdempotencyKey,
 	}
 
 	// Authorize
@@ -131,15 +216,21 @@ func (g *AcquirerGateway) Charge(ctx context.Context, req PaymentRequest) (*Paym
 	switch authResp.Status {
 	case domain.PaymentStatusAuthorized:
 		// 成功，进行 Capture
+		// B3: Capture key 使用稳定派生值：provider_idempotency_key + ":capture"
+		captureKey := req.ProviderIdempotencyKey + ":capture"
 		captureResp, err := client.Capture(ctx, domain.CaptureRequest{
-			ProviderRef: authResp.ProviderRef,
-			Amount:      req.Amount,
+			ChannelID:      req.AcquirerChannelID,
+			ProviderRef:    authResp.ProviderRef,
+			Amount:         req.Amount,
+			IdempotencyKey: captureKey,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("acquirer gateway: capture: %w", err)
 		}
+		// TransactionID 语义为渠道侧交易单号（Stripe pi_* / Nxtapay nx_tx_*），
+		// 与 MockProvider 的 txn_* 一致；不是本系统内部 UUID（内部关联用 attempt ID）。
 		return &PaymentResult{
-			TransactionID: authResp.TransactionID.String(),
+			TransactionID: captureResp.ProviderRef,
 			Status:        string(captureResp.Status),
 			ProviderRef:   captureResp.ProviderRef,
 		}, nil
@@ -150,33 +241,6 @@ func (g *AcquirerGateway) Charge(ctx context.Context, req PaymentRequest) (*Paym
 	default:
 		return nil, fmt.Errorf("acquirer gateway: unexpected auth status: %s", authResp.Status)
 	}
-}
-
-// channelIDFromOrder 从 OrderID 解析 channel ID
-// 约定：order:<channel_code>:<id> 格式，或使用默认 channel
-func (g *AcquirerGateway) channelIDFromOrder(orderID string) uuid.UUID {
-	// 默认使用第一个 active channel
-	if g.registry == nil {
-		return uuid.Nil
-	}
-
-	channels := g.registry.ListAll()
-	if len(channels) == 0 {
-		return uuid.Nil
-	}
-
-	// 查找匹配的 channel
-	for _, ch := range channels {
-		if ch.IsActive {
-			// 简单匹配：order 包含 channel code
-			if len(orderID) > len(ch.ChannelCode) && orderID[:len(ch.ChannelCode)] == ch.ChannelCode {
-				return ch.ChannelID
-			}
-		}
-	}
-
-	// 返回第一个 active channel
-	return channels[0].ChannelID
 }
 
 // extractCardBIN 从卡号提取 BIN（前6位）

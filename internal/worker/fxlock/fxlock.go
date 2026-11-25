@@ -15,6 +15,7 @@ import (
 	"github.com/nexusglobal/mamr/internal/payout/domain"
 	"github.com/nexusglobal/mamr/internal/payout/repository"
 	"github.com/nexusglobal/mamr/internal/payout/repository/db"
+	"github.com/nexusglobal/mamr/internal/platform/failclosed"
 	"github.com/nexusglobal/mamr/internal/platform/money"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
 	"github.com/nexusglobal/mamr/internal/worker/outbox"
@@ -30,6 +31,8 @@ type Worker struct {
 	txm        *postgres.TxManager
 	pool       *pgxpool.Pool
 	logger     *slog.Logger
+	// P0-2: failClosedSvc 用于 ExecutionCheck（LP FXLock dispatch 前）。
+	failClosedSvc *failclosed.Service
 }
 
 func New(repo *repository.Repository, lpCli lp.Client, feeService fee.FeeServiceInterface, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger) *Worker {
@@ -41,6 +44,35 @@ func New(repo *repository.Repository, lpCli lp.Client, feeService fee.FeeService
 		pool:       pool,
 		logger:     logger,
 	}
+}
+
+// NewWithFailClosed 创建带 Fail-Closed 服务注入的 fxlock Worker（P0-2）。
+func NewWithFailClosed(repo *repository.Repository, lpCli lp.Client, feeService fee.FeeServiceInterface, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger, failClosedSvc *failclosed.Service) *Worker {
+	return &Worker{
+		repo:          repo,
+		lpCli:         lpCli,
+		feeService:    feeService,
+		txm:           txm,
+		pool:          pool,
+		logger:        logger,
+		failClosedSvc: failClosedSvc,
+	}
+}
+
+// SetFailClosedService 注入 Fail-Closed 服务。
+func (w *Worker) SetFailClosedService(svc *failclosed.Service) {
+	w.failClosedSvc = svc
+}
+
+// executionCheck 是 LP FXLock dispatch 前的统一封锁检查（P0-2）。
+func (w *Worker) executionCheck(ctx context.Context) error {
+	if w.failClosedSvc != nil {
+		return w.failClosedSvc.ExecutionCheck(ctx)
+	}
+	if failclosed.IsSystemLockedDown() {
+		return failclosed.ErrSystemLockdown
+	}
+	return nil
 }
 
 func (w *Worker) Handle(ctx context.Context, event outbox.OutboxEvent) error {
@@ -72,6 +104,13 @@ func (w *Worker) Handle(ctx context.Context, event outbox.OutboxEvent) error {
 		w.logger.Info("fxlock: skipping non-frozen payout",
 			"payout_id", payoutID, "status", payoutReq.Status)
 		return nil
+	}
+
+	// P0-2: LP FXLock dispatch 前强一致封锁检查。
+	if err := w.executionCheck(ctx); err != nil {
+		w.logger.Warn("fxlock: blocked by system lockdown, will retry",
+			"payout_id", payoutID, "err", err)
+		return fmt.Errorf("fxlock: system lockdown: %w", err)
 	}
 
 	amt := money.NumericToDecimal(payoutReq.Amount)

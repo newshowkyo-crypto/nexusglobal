@@ -18,6 +18,9 @@ type IssuingAdapter interface {
 type IssuingAdapterFactory interface {
 	Create(ctx context.Context, providerCode string, credential map[string]string) (IssuingAdapter, error)
 	Register(providerCode string, factory func(context.Context, map[string]string) (IssuingAdapter, error))
+	Has(providerCode string) bool
+	Validate() error
+	RegisteredCodes() []string
 }
 
 type CreateCardRequest struct {
@@ -41,9 +44,13 @@ type CreateCardResult struct {
 }
 
 type FreezeCardRequest struct {
-	CardID       uuid.UUID
-	ProviderID   uuid.UUID
-	FrozenReason string
+	LocalCardID     uuid.UUID
+	ProviderID      uuid.UUID
+	ProviderCardRef string
+	IdempotencyKey  string
+	FrozenReason    string
+	// CardID 保留向后兼容（= LocalCardID），新代码应使用 LocalCardID。
+	CardID uuid.UUID
 }
 
 type TerminateCardRequest struct {

@@ -1,3 +1,9 @@
+// Package service — MAE 路由参考实现。
+//
+// P1 之后，真实选路统一由 internal/pool 的分配器负责
+// （硬过滤 → 打分 → 加权抽样 → 额度预占）。
+// 本文件中的 Router 仅作为 MAE 侧规则的参考实现保留，
+// 不参与线上交易路由；请勿在新增代码中调用 NewRouter。
 package service
 
 import (

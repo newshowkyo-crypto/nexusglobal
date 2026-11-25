@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -10,47 +11,28 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/nexusglobal/mamr/internal/acquirer"
+	acquireradapter "github.com/nexusglobal/mamr/internal/acquirer/adapter"
+	acquirerdomain "github.com/nexusglobal/mamr/internal/acquirer/domain"
 	acquirerhandler "github.com/nexusglobal/mamr/internal/acquirer/handler"
 	"github.com/nexusglobal/mamr/internal/acquirer/registry"
 	"github.com/nexusglobal/mamr/internal/acquirer/repository"
-	"github.com/nexusglobal/mamr/internal/admin"
 	"github.com/nexusglobal/mamr/internal/checkout"
-	disputehandler "github.com/nexusglobal/mamr/internal/dispute/handler"
-	disputerepo "github.com/nexusglobal/mamr/internal/dispute/repository"
-	disputeservice "github.com/nexusglobal/mamr/internal/dispute/service"
-	ledgerhandler "github.com/nexusglobal/mamr/internal/ledger/handler"
-	"github.com/nexusglobal/mamr/internal/ledger/repository/db"
-	ledgerservice "github.com/nexusglobal/mamr/internal/ledger/service"
-	maehandler "github.com/nexusglobal/mamr/internal/mae/handler"
-	maemetric "github.com/nexusglobal/mamr/internal/mae/metric"
-	maerepo "github.com/nexusglobal/mamr/internal/mae/repository"
-	maeservice "github.com/nexusglobal/mamr/internal/mae/service"
-	payouthandler "github.com/nexusglobal/mamr/internal/payout/handler"
-	payoutrepo "github.com/nexusglobal/mamr/internal/payout/repository"
-	payoutservice "github.com/nexusglobal/mamr/internal/payout/service"
 	"github.com/nexusglobal/mamr/internal/pipeline"
+	pipelinerepo "github.com/nexusglobal/mamr/internal/pipeline/repository"
 	"github.com/nexusglobal/mamr/internal/platform/config"
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
 	"github.com/nexusglobal/mamr/internal/platform/factories"
-	"github.com/nexusglobal/mamr/internal/platform/httpx"
+	"github.com/nexusglobal/mamr/internal/platform/failclosed"
 	"github.com/nexusglobal/mamr/internal/platform/logger"
 	"github.com/nexusglobal/mamr/internal/platform/otel"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
-	"github.com/nexusglobal/mamr/internal/platform/stream"
+	"github.com/nexusglobal/mamr/internal/platform/router"
 	riskcarding "github.com/nexusglobal/mamr/internal/risk/carding"
 	"github.com/nexusglobal/mamr/internal/token"
-	treasuryhandler "github.com/nexusglobal/mamr/internal/treasury/handler"
-	treasuryrepo "github.com/nexusglobal/mamr/internal/treasury/repository"
-	"github.com/nexusglobal/mamr/internal/treasury/scheduler"
-	treasuryservice "github.com/nexusglobal/mamr/internal/treasury/service"
-	webhookhandler "github.com/nexusglobal/mamr/internal/webhook/handler"
-	webhookrepo "github.com/nexusglobal/mamr/internal/webhook/repository"
 )
 
 func main() {
@@ -87,12 +69,6 @@ func main() {
 		rdb = nil
 	}
 
-	r := chi.NewRouter()
-	r.Use(middleware.RealIP)
-	r.Use(httpx.RequestID)
-	r.Use(httpx.RequestLogger(log))
-	r.Use(httpx.Recover(log))
-
 	deps, err := factories.NewExternalDeps(cfg)
 	if err != nil {
 		log.Error("init external deps", "err", err)
@@ -103,46 +79,6 @@ func main() {
 	if deps.KMS != nil {
 		enc = crypto.NewEncryptor(deps.KMS)
 	}
-
-	queries := db.New(pool)
-	ledgerH := ledgerhandler.New(queries)
-
-	payoutRepo := payoutrepo.New(pool)
-	ledgerRepo := payoutrepo.NewLedgerRepo(pool)
-	txm := postgres.NewTxManager(pool)
-	payoutSvc := payoutservice.New(payoutRepo, ledgerRepo, enc, txm, pool)
-	payoutH := payouthandler.New(payoutSvc)
-
-	ledgerSvc := ledgerservice.New(ledgerRepo, txm, pool)
-	disputeRepo := disputerepo.New(pool)
-	disputeSvc := disputeservice.New(disputeRepo, ledgerSvc, txm)
-	disputeH := disputehandler.New(disputeSvc)
-
-	maeRepo := maerepo.New(pool)
-	maeSvc := maeservice.New(maeRepo, enc, pool)
-	var maeMetrics *maemetric.Aggregator
-	if rdb != nil {
-		maeMetrics = maemetric.NewAggregator(rdb)
-	}
-	maeH := maehandler.New(maeSvc, maeMetrics)
-
-	var webhookH *webhookhandler.Handler
-	var producer *stream.Producer
-	if rdb != nil {
-		producer = stream.NewProducer(rdb)
-		webhookRepoInst := webhookrepo.New(pool)
-		webhookH = webhookhandler.New(webhookRepoInst, producer, enc)
-	} else {
-		webhookH = webhookhandler.New(nil, nil, enc)
-	}
-
-	treasuryRepoInst := treasuryrepo.New(pool)
-	var delayQ *scheduler.DelayQueue
-	if rdb != nil {
-		delayQ = scheduler.NewDelayQueue(rdb, "SWEEP_DELAY")
-	}
-	treasurySvc := treasuryservice.New(treasuryRepoInst, deps.Bank, txm, pool, delayQ, log)
-	treasuryH := treasuryhandler.New(treasurySvc)
 
 	// 任务包 B: Anti-Carding Redis Sliding Window Gateway
 	var riskGateway *riskcarding.Gateway
@@ -156,289 +92,129 @@ func main() {
 		})
 		riskRepo := riskcarding.NewRepository(pool)
 		riskSvc = riskcarding.NewService(riskGateway, riskRepo, pool, log)
+		riskSvc.SetRuleStore(riskcarding.NewRuleStore(pool))
 		riskH = riskcarding.NewHandler(riskSvc)
 	}
 
-	dbPing := func() error { return pool.Ping(context.Background()) }
-	redisPing := func() error {
-		if rdb == nil {
-			return http.ErrServerClosed
-		}
-		return rdb.Ping(context.Background()).Err()
-	}
-
-	r.Get("/healthz", httpx.HealthCheck(dbPing, redisPing))
-	r.Get("/readyz", httpx.ReadinessCheck(dbPing, redisPing))
-
-	adminH := admin.NewHandler(pool, enc)
-	v3ChannelsH := admin.NewV3ChannelsHandler(pool, rdb)
-	v3IssuingPoolsH := admin.NewV3IssuingPoolsHandler(pool, rdb)
-	killSwitchH := admin.NewKillSwitchHandler(pool, rdb)
-
-	r.Route("/admin", func(r chi.Router) {
-		r.Use(httpx.AdminAuth(cfg.JWTSecret))
-
-		r.Get("/dashboard", httpx.AdminDashboardHTML(pool, rdb, cfg.AppEnv))
-		r.Get("/dashboard/data", httpx.DashboardHandler(pool, rdb, cfg.AppEnv))
-
-		// Stats
-		r.Get("/stats", adminH.GetStats)
-
-		// MAE management
-		r.Get("/mae-list", adminH.ListMAEs)
-		r.Get("/mae-detail/{mae_id}", adminH.GetMAE)
-
-		// Payout management
-		r.Get("/payouts", adminH.ListPayouts)
-		r.Get("/payout/{id}", adminH.GetPayout)
-
-		// Outbox
-		r.Get("/outbox", adminH.ListOutbox)
-		r.Get("/outbox/{id}", adminH.GetOutbox)
-
-		// Treasury
-		r.Get("/calendars", adminH.ListCalendars)
-		r.Get("/sweep-rules", adminH.ListSweepRules)
-		r.Get("/sweep-transfers", adminH.ListSweepTransfers)
-
-		// Webhook
-		r.Get("/webhook-events", adminH.ListWebhookEvents)
-		r.Get("/webhook-event/{id}", adminH.GetWebhookEvent)
-
-		// Ledger
-		r.Get("/ledger/transactions", adminH.ListLedgerTransactions)
-		r.Get("/ledger/entries", adminH.ListLedgerEntries)
-
-		// Merchants
-		r.Get("/merchants", adminH.ListMerchants)
-
-		// Universal Adapter Registry API
-		r.Route("/adapter", func(r chi.Router) {
-			r.Get("/providers", adminH.ListAdapterProviders)
-			r.Post("/providers", adminH.CreateAdapterProvider)
-			r.Patch("/providers/{id}", adminH.UpdateAdapterProvider)
-			r.Delete("/providers/{id}", adminH.DeleteAdapterProvider)
-			r.Get("/channels", adminH.ListAdapterChannels)
-			r.Post("/channels", adminH.CreateAdapterChannel)
-			r.Patch("/channels/{id}", adminH.UpdateAdapterChannel)
-			r.Post("/channels/{id}/enable", adminH.EnableAdapterChannel)
-			r.Post("/channels/{id}/disable", adminH.DisableAdapterChannel)
-			r.Post("/channels/{id}/reload", adminH.ReloadAdapterChannel)
-		})
-
-		// Corporate Entity API
-		r.Route("/entities", func(r chi.Router) {
-			r.Get("/", adminH.ListEntities)
-			r.Post("/", adminH.CreateEntity)
-			r.Patch("/{id}", adminH.UpdateEntity)
-			r.Post("/{id}/risk-hold", adminH.SetEntityRiskHold)
-			r.Post("/{id}/enable", adminH.EnableEntity)
-		})
-
-		// Asset Bridge API
-		r.Route("/asset-bridge/profiles", func(r chi.Router) {
-			r.Get("/", adminH.ListBridgeProfiles)
-			r.Post("/", adminH.CreateBridgeProfile)
-			r.Patch("/{id}", adminH.UpdateBridgeProfile)
-			r.Post("/{id}/enable", adminH.EnableBridgeProfile)
-			r.Post("/{id}/disable", adminH.DisableBridgeProfile)
-		})
-
-		// Wallet Policy API
-		r.Route("/wallet-policies", func(r chi.Router) {
-			r.Get("/", adminH.ListWalletPolicies)
-			r.Post("/", adminH.CreateWalletPolicy)
-			r.Patch("/{id}", adminH.UpdateWalletPolicy)
-			r.Post("/{id}/enable", adminH.EnableWalletPolicy)
-			r.Post("/{id}/disable", adminH.DisableWalletPolicy)
-		})
-
-		// V3 合规升级 API
-		r.Route("/v3", func(r chi.Router) {
-			// 通道风控配置
-			r.Get("/channel-risk", adminH.ListChannelRiskConfigs)
-			r.Patch("/channel-risk/{id}", adminH.UpdateChannelRiskConfig)
-
-			// 商户风险配置
-			r.Get("/merchant-risk-profiles", adminH.ListMerchantRiskProfiles)
-			r.Post("/merchant-risk-profiles", adminH.CreateMerchantRiskProfile)
-
-			// 滚动准备金记录
-			r.Get("/rolling-reserves", adminH.ListRollingReserveEntries)
-
-			// 费用摊销记录
-			r.Get("/fee-allocations", adminH.ListFeeAllocations)
-
-			// 管道隔离组
-			r.Get("/isolation-groups", adminH.ListIsolationGroups)
-			r.Post("/isolation-groups", adminH.CreateIsolationGroup)
-			r.Post("/isolation-groups/{id}/freeze", adminH.FreezeIsolationGroup)
-			r.Post("/isolation-groups/{id}/unfreeze", adminH.UnfreezeIsolationGroup)
-
-			// RFI 合规资料包
-			r.Get("/rfi-documents", adminH.ListRFIDocuments)
-			r.Post("/rfi-documents/generate", adminH.GenerateRFIDocument)
-			r.Get("/rfi-documents/{id}", adminH.GetRFIDocument)
-			r.Post("/rfi-documents/{id}/approve", adminH.ApproveRFIDocument)
-			r.Post("/rfi-documents/{id}/reject", adminH.RejectRFIDocument)
-
-			// Override 审计日志
-			r.Get("/override-audit-logs", adminH.ListOverrideAuditLogs)
-
-			// Tier-Based Acquiring Channels API
-			r.Route("/api/v3/channels", func(r chi.Router) {
-				r.Get("/", v3ChannelsH.ListChannels)
-				r.Post("/", v3ChannelsH.CreateChannel)
-				r.Patch("/{id}", v3ChannelsH.UpdateChannel)
-				r.Post("/{id}/enable", v3ChannelsH.EnableChannel)
-				r.Post("/{id}/disable", v3ChannelsH.DisableChannel)
-				r.Post("/{id}/reload", v3ChannelsH.ReloadChannel)
-			})
-
-			// Tier-Based Issuing Pools API
-			r.Route("/api/v3/issuing/pools", func(r chi.Router) {
-				r.Get("/", v3IssuingPoolsH.ListPools)
-				r.Post("/", v3IssuingPoolsH.CreatePool)
-				r.Patch("/{id}", v3IssuingPoolsH.UpdatePool)
-				r.Post("/{id}/enable", v3IssuingPoolsH.EnablePool)
-				r.Post("/{id}/disable", v3IssuingPoolsH.DisablePool)
-				r.Post("/{id}/reload", v3IssuingPoolsH.ReloadPool)
-			})
-		})
-
-		// R3-3: 数据录入端点
-		r.Post("/bank-account", adminH.CreateBankAccount) // 银行账户（表 bank_account_balance）
-		r.Post("/bank-calendar", adminH.CreateBankCalendar)
-		r.Post("/mae-config", adminH.CreateMAEConfig)
-		r.Post("/sweep-rule-create", adminH.CreateSweepRule)
-		r.Post("/webhook-proxy", adminH.CreateWebhookProxy)
-		r.Post("/merchant-create", adminH.CreateMerchant)
-		r.Post("/payout-address", adminH.CreatePayoutAddress)
-
-		// Tier-Based Admin API (Dashboard calls /admin/api/v3/*)
-		r.Route("/api/v3", func(r chi.Router) {
-			r.Route("/channels", func(r chi.Router) {
-				r.Get("/", v3ChannelsH.ListChannels)
-				r.Post("/", v3ChannelsH.CreateChannel)
-				r.Patch("/{id}", v3ChannelsH.UpdateChannel)
-				r.Post("/{id}/enable", v3ChannelsH.EnableChannel)
-				r.Post("/{id}/disable", v3ChannelsH.DisableChannel)
-				r.Post("/{id}/reload", v3ChannelsH.ReloadChannel)
-			})
-			r.Route("/issuing/pools", func(r chi.Router) {
-				r.Get("/", v3IssuingPoolsH.ListPools)
-				r.Post("/", v3IssuingPoolsH.CreatePool)
-				r.Patch("/{id}", v3IssuingPoolsH.UpdatePool)
-				r.Post("/{id}/enable", v3IssuingPoolsH.EnablePool)
-				r.Post("/{id}/disable", v3IssuingPoolsH.DisablePool)
-				r.Post("/{id}/reload", v3IssuingPoolsH.ReloadPool)
-			})
-			r.Route("/system", func(r chi.Router) {
-				r.Post("/lockdown", killSwitchH.Lockdown)
-			})
-			r.Get("/events/stream", killSwitchH.EventsStream)
-		})
-
-		r.Route("/merchant/{id}", func(r chi.Router) {
-			r.Get("/balance", ledgerH.GetBalance)
-		})
-		r.Route("/mae", func(r chi.Router) {
-			r.Post("/", maeH.Create)
-			r.Patch("/{mae_id}", maeH.Update)
-			r.Post("/{mae_id}/rotate-secret", maeH.RotateSecret)
-			r.Post("/{mae_id}/status", maeH.ChangeStatus)
-			r.Get("/{mae_id}/metrics", maeH.GetMetrics)
-		})
-		r.Route("/banking-calendar", func(r chi.Router) {
-			r.Post("/", treasuryH.CreateCalendar)
-		})
-		r.Route("/sweep-rule", func(r chi.Router) {
-			r.Post("/", treasuryH.CreateSweepRule)
-			r.Patch("/{id}", treasuryH.UpdateSweepRule)
-		})
-		r.Get("/webhook/events", webhookH.ListEvents)
-		r.Post("/webhook/events/{id}/replay", webhookH.Replay)
-
-		// 任务包 B: Risk events
-		if riskH != nil {
-			r.Get("/risk/events", riskH.ListEvents)
-			r.Get("/risk/events/{id}", riskH.GetEvent)
-		}
-	})
-
-	r.Route("/merchant", func(r chi.Router) {
-		r.Use(httpx.MerchantAuth(cfg.JWTSecret))
-		r.Post("/payout-address", payoutH.CreateAddress)
-		r.Post("/payout-request", payoutH.CreatePayoutRequest)
-	})
-
-	r.Route("/internal", func(r chi.Router) {
-		r.Use(httpx.InternalAuth(cfg.InternalToken))
-		r.Get("/metrics", httpx.MetricsHandler().ServeHTTP) // G9: 移入鉴权保护
-		r.Post("/payout/{id}/freeze", payoutH.Freeze)
-		r.Post("/payout/{id}/fx-lock", payoutH.FxLock)
-		r.Post("/payout/{id}/submit", payoutH.Submit)
-		r.Post("/payout/{id}/reconcile", payoutH.Reconcile)
-		r.Post("/sweep/evaluate", treasuryH.Evaluate)
-		r.Post("/sweep/{id}/submit", treasuryH.Submit)
-		r.Post("/sweep/{id}/reconcile", treasuryH.Reconcile)
-		r.Post("/sweep/approval/{id}/approve", treasuryH.ApproveSweep)
-		r.Post("/mae/{mae_id}/circuit-break", maeH.CircuitBreak)
-		// Dispute endpoints
-		r.Post("/dispute/refund", disputeH.RefundConfirmed)
-		r.Post("/dispute/chargeback", disputeH.ChargebackReceived)
-		r.Post("/dispute/{dispute_id}/reverse", disputeH.ChargebackReversed)
-		// 任务包 B: Anti-Carding endpoints
-		if riskH != nil {
-			r.Post("/risk/evaluate", riskH.Evaluate)
-			r.Post("/risk/failure", riskH.RecordFailure)
-			r.Post("/risk/success", riskH.RecordSuccess)
-			r.Post("/risk/cooldown/{merchant_id}", riskH.SetCooldown)
-			r.Delete("/risk/cooldown/{merchant_id}", riskH.ClearCooldown)
-		}
-		// R2-2: TestingEvaluate 已下线（worker tick 覆盖真实评估）
-	})
-
-	r.Route("/webhook", func(r chi.Router) {
-		r.Post("/mae/{provider_id}", webhookH.HandleMAE)
-		r.Post("/bank/{provider_id}", webhookH.HandleBank)
-		r.Post("/lp/{provider_id}", webhookH.HandleLP)
-	})
-
-	// Checkout routes
-	// R3-2: 按配置选择 token store
-	var tokenStore token.Store
-	if rdb != nil && cfg.TokenStore == "redis" {
-		tokenStore = token.NewRedisStore(rdb)
-		log.Info("using redis token store")
-	} else {
-		tokenStore = token.NewMemoryStore()
-		log.Info("using memory token store")
-	}
-	tokenSvc := token.NewService(tokenStore)
+	// 初始化 Acquirer Registry（所有模式都需要）
 	checkoutTmpl, err := template.ParseFiles("web/checkout/checkout.html")
 	if err != nil {
 		log.Warn("checkout template not found, checkout disabled", "err", err)
 	}
 
-	// 初始化 Acquirer Registry（所有模式都需要）
+	// PAY-003: 状态页模板（/checkout/v3/{id} 与 /pay/{token} 的浏览器视图）
+	statusTmpl, err := template.ParseFiles("web/checkout/status.html")
+	if err != nil {
+		log.Warn("status template not found, resolver returns JSON only", "err", err)
+		statusTmpl = nil
+	}
+
 	var paymentGW checkout.PaymentGateway
 	var acqH *acquirerhandler.Handler
+	var acqRepo *repository.Repository
+	var acqReg *registry.ChannelRegistry
 
 	if checkoutTmpl != nil {
 		// 始终创建 acquirerRepo 和 acqReg（无论 mock 或 real 模式）
-		acquirerRepo := repository.New(pool)
+		acqRepo = repository.New(pool)
 
 		// 判断是否是 real 模式
 		isRealMode := cfg.AcquirerMode == "real" || cfg.AppEnv == "production"
 
-		acqReg := registry.NewChannelRegistry(registry.RegistryConfig{
-			Repo:       acquirerRepo,
+		// P0-3: 创建 DefaultAdapterFactory 并注册 provider 构造器
+		factory := registry.NewDefaultAdapterFactory(log)
+		if !isRealMode {
+			factory.Register("mock", func(credentials map[acquirerdomain.CredentialType]string, config map[string]any) (acquirerdomain.AcquirerAdapter, error) {
+				webhookSecret := credentials[acquirerdomain.CredentialTypeWebhookSecret]
+				mockAcquirer := acquireradapter.NewMockAcquirer(webhookSecret)
+				if config != nil {
+					if scenarios, ok := config["scenarios"].(map[string]interface{}); ok {
+						for orderID, scenarioStr := range scenarios {
+							switch fmt.Sprintf("%v", scenarioStr) {
+							case "success":
+								mockAcquirer.SetScenario(orderID, acquireradapter.ScenarioSuccess)
+							case "failure":
+								mockAcquirer.SetScenario(orderID, acquireradapter.ScenarioFailure)
+							case "timeout":
+								mockAcquirer.SetScenario(orderID, acquireradapter.ScenarioTimeout)
+							case "partial":
+								mockAcquirer.SetScenario(orderID, acquireradapter.ScenarioPartial)
+							}
+						}
+					}
+					if timeoutMs, ok := config["timeout_ms"].(float64); ok && timeoutMs > 0 {
+						mockAcquirer.SetDefaultDelay(time.Duration(timeoutMs) * time.Millisecond)
+					} else {
+						mockAcquirer.SetDefaultDelay(100 * time.Millisecond)
+					}
+				}
+				return mockAcquirer, nil
+			})
+		}
+		factory.Register("stripe", func(credentials map[acquirerdomain.CredentialType]string, config map[string]any) (acquirerdomain.AcquirerAdapter, error) {
+			secretKey := credentials[acquirerdomain.CredentialTypeSecret]
+			webhookSecret := credentials[acquirerdomain.CredentialTypeWebhookSecret]
+			if secretKey == "" {
+				return nil, acquirerdomain.ErrCredentialVaultKeyEmpty
+			}
+			timeout := 30 * time.Second
+			if cfgTimeout, ok := config["timeout_ms"].(float64); ok && cfgTimeout > 0 {
+				timeout = time.Duration(cfgTimeout) * time.Millisecond
+			}
+			stripeClient, err := acquireradapter.NewStripeClient(acquireradapter.StripeConfig{
+				SecretKey:     secretKey,
+				WebhookSecret: webhookSecret,
+				Timeout:       timeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return acquireradapter.NewStripeAcquirer(stripeClient), nil
+		})
+		factory.Register("nxtapay", func(credentials map[acquirerdomain.CredentialType]string, config map[string]any) (acquirerdomain.AcquirerAdapter, error) {
+			apiKey := credentials[acquirerdomain.CredentialTypeAPIKey]
+			apiSecret := credentials[acquirerdomain.CredentialTypeSecret]
+			webhookSecret := credentials[acquirerdomain.CredentialTypeWebhookSecret]
+			if apiKey == "" {
+				return nil, acquirerdomain.ErrCredentialVaultKeyEmpty
+			}
+			if apiSecret == "" {
+				return nil, acquirerdomain.ErrCredentialVaultKeyEmpty
+			}
+			baseURL := "https://sandbox.nxtapay.com/api/v1"
+			if cfgBaseURL, ok := config["base_url"].(string); ok && cfgBaseURL != "" {
+				baseURL = cfgBaseURL
+			}
+			timeout := 30 * time.Second
+			if cfgTimeout, ok := config["timeout_ms"].(float64); ok && cfgTimeout > 0 {
+				timeout = time.Duration(cfgTimeout) * time.Millisecond
+			}
+			merchantID := ""
+			if cfgMerchantID, ok := config["merchant_id"].(string); ok {
+				merchantID = cfgMerchantID
+			}
+			nxtapayClient, err := acquireradapter.NewNxtapayClient(acquireradapter.NxtapayConfig{
+				APIKey:        apiKey,
+				APISecret:     apiSecret,
+				MerchantID:    merchantID,
+				WebhookSecret: webhookSecret,
+				BaseURL:       baseURL,
+				Timeout:       timeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return acquireradapter.NewNxtapayAcquirer(nxtapayClient), nil
+		})
+
+		acqReg = registry.NewChannelRegistry(registry.RegistryConfig{
+			Repo:       acqRepo,
 			Encryptor:  enc,
 			RDB:        rdb,
 			Logger:     log,
 			FailMode:   registry.FailModeClosed, // production 默认 fail-closed
 			IsRealMode: isRealMode,
+			Factory:    factory, // P0-3: 注入 Factory
 		})
 
 		// 启动时预热：加载所有 active channel（无论 mock 或 real 模式）
@@ -467,32 +243,14 @@ func main() {
 		// 创建 AcquirerGateway（使用 ChannelRegistry）
 		// isReal=true 时会拒绝 raw card，要求 payment_method_token
 		// 初始化管道隔离服务（暂时使用 nil repository，后续需要实现）
-		pipelineSvc := pipeline.NewService(nil, time.Now)
-		paymentGW = checkout.NewAcquirerGateway(acqReg, pipelineSvc, isRealMode)
-
-		// 创建 acquirer service 和 handler（无论 mock 或 real 模式）
-		acqSvc := acquirer.NewService(acquirerRepo, acqReg, enc, log)
+		acqSvc := acquirer.NewService(acqRepo, acqReg, enc, log)
 		acqH = acquirerhandler.New(acqSvc, enc)
-
-		// 注册 Acquirer 管理 API（无论 mock 或 real 模式）
-		r.Route("/admin/acquirer", func(r chi.Router) {
-			r.Use(httpx.AdminAuth(cfg.JWTSecret))
-			r.Get("/providers", acqH.ListProviders)
-			r.Post("/providers", acqH.CreateProvider)
-			r.Get("/channels", acqH.ListChannels)
-			r.Post("/channels", acqH.CreateChannel)
-			r.Patch("/channels/{id}", acqH.UpdateChannel)
-			r.Post("/channels/{id}/enable", acqH.EnableChannel)
-			r.Post("/channels/{id}/disable", acqH.DisableChannel)
-			r.Post("/channels/{id}/rotate-secret", acqH.RotateSecret)
-			r.Post("/channels/{id}/reload", acqH.ReloadChannel)
-		})
 
 		log.Info("acquirer gateway initialized", "is_real", isRealMode)
 	}
 
 	// 设置 checkout handler（如果模板可用）
-	if checkoutTmpl != nil && paymentGW != nil {
+	if checkoutTmpl != nil && acqReg != nil {
 		var orderProvider checkout.OrderProvider
 		switch cfg.CheckoutOrderProvider {
 		case "mock":
@@ -500,27 +258,93 @@ func main() {
 		case "disabled":
 			log.Warn("checkout order provider disabled, checkout routes not registered")
 		case "http":
-			log.Error("checkout HTTP order provider is not implemented; refusing to start with mock fallback")
-			os.Exit(1)
+			if cfg.CheckoutOrderAPIURL == "" {
+				log.Error("checkout HTTP order provider requires CHECKOUT_ORDER_API_URL config")
+				os.Exit(1)
+			}
+			orderProvider = checkout.NewHTTPOrderProvider(cfg.CheckoutOrderAPIURL)
+			log.Info("checkout HTTP order provider initialized", "api_url", cfg.CheckoutOrderAPIURL)
 		default:
 			log.Error("unknown checkout order provider", "provider", cfg.CheckoutOrderProvider)
 			os.Exit(1)
 		}
 
 		if orderProvider != nil {
-			checkoutH := checkout.NewHandler(tokenSvc, orderProvider, paymentGW, riskGateway, checkoutTmpl)
-			r.Get("/checkout", checkoutH.ServeCheckoutPage)
-			r.Route("/api/checkout", func(r chi.Router) {
-				r.Post("/token", checkoutH.HandleCreateToken)
-				r.Get("/validate", checkoutH.HandleValidateToken)
-				r.Post("/charge", checkoutH.HandleCharge)
-			})
+			// P0-3: 在组合根中先构造 PipelineService，再注入 AcquirerGateway。
+			// production/real 模式下 PipelineService 缺失必须启动失败。
+			// 不允许回退到 NoopRepository（G05 fail-closed）。
+			isRealMode := cfg.AcquirerMode == "real" || cfg.AppEnv == "production"
+			var pipelineSvc *pipeline.Service
+			if pool != nil {
+				pipelineRepo := pipelinerepo.NewDBRepository(pool)
+				pipelineSvc = pipeline.NewService(pipelineRepo, time.Now)
+			} else if isRealMode {
+				log.Error("pipeline service required in real/production mode but pool is nil, fail-closed")
+				os.Exit(1)
+			}
+			paymentGW = checkout.NewAcquirerGateway(acqReg, pipelineSvc, isRealMode)
 		}
 	}
+
+	// R3-2: 按配置选择 token store（仅用于日志提示，实际构造在 BuildRouter 内）
+	if rdb != nil && cfg.TokenStore == "redis" {
+		log.Info("using redis token store")
+	} else {
+		log.Info("using memory token store")
+	}
+	_ = token.NewService(token.NewMemoryStore()) // 触发 token 包初始化
+
+	// G07: 构造持久化 Kill Switch Service 并从 DB 加载状态到进程内缓存。
+	// DB 是真相（RED-14），启动时必须加载以支持重启恢复与多节点同步。
+	failClosedSvc := failclosed.NewService(pool, rdb, log)
+	if rec, err := failClosedSvc.LoadFromDB(ctx); err != nil {
+		log.Error("failclosed: load from DB failed, fail-closed", "err", err)
+		// 启动时无法加载控制状态：fail closed，拒绝启动
+		os.Exit(1)
+	} else if rec.IsLocked() {
+		log.Warn("failclosed: system loaded in LOCKED state from DB; new financial flows will be blocked")
+	}
+
+	// G07: 启动多节点同步订阅器（Redis pub/sub）
+	var failClosedSub *failclosed.Subscriber
+	if rdb != nil {
+		failClosedSub = failclosed.NewSubscriber(failClosedSvc, rdb, log)
+		if err := failClosedSub.Start(ctx); err != nil {
+			log.Warn("failclosed: subscriber start failed, continuing without pub/sub sync", "err", err)
+		}
+		defer failClosedSub.Stop()
+	}
+
+	// 构造 Deps 并委托给 BuildRouter 装配路由树。
+	// 这保证 main() 与测试走同一装配路径 (G03 前置要求)。
+	routerDeps := router.Deps{
+		Cfg:               cfg,
+		Log:               log,
+		Pool:              pool,
+		Rdb:               rdb,
+		Enc:               enc,
+		CheckoutTmpl:      checkoutTmpl,
+		StatusTmpl:        statusTmpl,
+		ExternalDeps:      deps,
+		RiskGateway:       riskGateway,
+		RiskService:       riskSvc,
+		RiskHandler:       riskH,
+		AcquirerGateway:   paymentGW,
+		AcquirerHandler:   acqH,
+		AcquirerRepo:      acqRepo,
+		AcquirerReg:       acqReg,
+		FailClosedService: failClosedSvc,
+	}
+	r := router.BuildRouter(routerDeps)
 
 	srv := &http.Server{
 		Addr:    cfg.HTTPAddr,
 		Handler: otelhttp.NewHandler(r, "nexusglobal-api"),
+		// OPS: 生产必须设置超时——防慢连接耗尽 fd 与 Slowloris
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

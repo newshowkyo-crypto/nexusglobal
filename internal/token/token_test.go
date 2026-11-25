@@ -127,3 +127,66 @@ func TestService_Redeem_NotFound(t *testing.T) {
 	_, err := svc.Redeem(ctx, RedeemTokenCmd{Value: "nonexistent"})
 	assert.ErrorIs(t, err, ErrTokenNotFound)
 }
+
+// SEC-003: Peek 校验但不消费 single-use token——页面查看/validate 只 peek，
+// 多次 Peek 后 token 仍可被 Redeem 一次性消费。
+func TestService_Peek_DoesNotConsume(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store)
+	ctx := context.Background()
+
+	token, err := svc.Create(ctx, CreateTokenCmd{
+		OrderID:    "order-123",
+		MerchantID: "merchant-1",
+		MaxUses:    1,
+		TTL:        15 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	// 多次 Peek（模拟页面刷新/validate）
+	for i := 0; i < 3; i++ {
+		p, err := svc.Peek(ctx, RedeemTokenCmd{
+			Value:   token.Value,
+			Origin:  "https://checkout.example.com",
+			OrderID: "order-123",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 0, p.UsedCount, "Peek must not increment used count")
+	}
+
+	// Peek 后 Redeem 仍然成功（旧实现会直接 ErrTokenUsed）
+	redeemed, err := svc.Redeem(ctx, RedeemTokenCmd{
+		Value:   token.Value,
+		Origin:  "https://checkout.example.com",
+		OrderID: "order-123",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, redeemed.UsedCount)
+
+	// 消费后 Peek 也应报告已用
+	_, err = svc.Peek(ctx, RedeemTokenCmd{
+		Value:   token.Value,
+		Origin:  "https://checkout.example.com",
+		OrderID: "order-123",
+	})
+	assert.ErrorIs(t, err, ErrTokenUsed)
+}
+
+// SEC-003: Peek 与 Redeem 的校验规则一致（过期拒绝）。
+func TestService_Peek_Expired(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store)
+	ctx := context.Background()
+
+	token, err := svc.Create(ctx, CreateTokenCmd{
+		OrderID: "order-123",
+		MaxUses: 1,
+		TTL:     1 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	time.Sleep(5 * time.Millisecond) // Create 对非正 TTL 回退 15min，用短 TTL + sleep 制造过期
+
+	_, err = svc.Peek(ctx, RedeemTokenCmd{Value: token.Value})
+	assert.ErrorIs(t, err, ErrTokenExpired)
+}

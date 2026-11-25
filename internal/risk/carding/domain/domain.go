@@ -38,6 +38,9 @@ const (
 	DimensionMerchantID DimensionType = "merchant_id"
 	DimensionCardBIN    DimensionType = "card_bin_hash"
 	DimensionDevice     DimensionType = "device_hash"
+	// P6: 池化维度
+	DimensionChannel DimensionType = "channel_id"
+	DimensionSite    DimensionType = "site_id"
 )
 
 // ChannelStrategyMode 通道风控策略模式
@@ -57,6 +60,8 @@ type CheckRequest struct {
 	BuyerIP      string              // 原始 IP，内部会 hash
 	CardBIN      string              // 原始 BIN（6-8位），内部会 hash
 	DeviceID     string              // 设备指纹，内部会 hash
+	ChannelID    uuid.UUID           // P6: 收单通道（池化维度）
+	SiteID       string              // P6: 站点（池化维度）
 	StrategyMode ChannelStrategyMode // 通道策略模式
 }
 
@@ -82,6 +87,8 @@ type RiskEvent struct {
 	BuyerIPHash  string
 	CardBINHash  string
 	DeviceHash   string
+	ChannelID    uuid.UUID // P6: 收单通道
+	SiteID       string    // P6: 站点
 	WindowType   WindowType
 	ThresholdHit int
 	CurrentCount int
@@ -100,6 +107,63 @@ type DimensionConfig struct {
 	Dimension DimensionType
 	Threshold int
 	Window    WindowType
+}
+
+// RuleScope 规则作用域。
+type RuleScope string
+
+const (
+	ScopeGlobal   RuleScope = "GLOBAL"
+	ScopeMerchant RuleScope = "MERCHANT"
+	ScopeSite     RuleScope = "SITE"
+	ScopeChannel  RuleScope = "CHANNEL"
+)
+
+// Rule 表化风控规则（P6）。
+type Rule struct {
+	ID          uuid.UUID     `json:"id"`
+	TenantID    *uuid.UUID    `json:"tenant_id,omitempty"`
+	MerchantID  *uuid.UUID    `json:"merchant_id,omitempty"`
+	Scope       RuleScope     `json:"scope"`
+	ScopeID     string        `json:"scope_id"`
+	Dimension   DimensionType `json:"dimension"`
+	Window      WindowType    `json:"window_type"`
+	Threshold   int           `json:"threshold"`
+	FailureRate float64       `json:"failure_rate"`
+	MinSample   int           `json:"min_sample"`
+	Priority    int           `json:"priority"`
+	Status      string        `json:"status"`
+	Version     int           `json:"version"`
+}
+
+// EffectiveRules 合并作用域覆盖后的有效阈值（P6）。
+type EffectiveRules struct {
+	IPThreshold      int
+	IPWindow         WindowType
+	BINThreshold     int
+	BINWindow        WindowType
+	DeviceThreshold  int
+	DeviceWindow     WindowType
+	ChannelThreshold int
+	ChannelWindow    WindowType
+	SiteThreshold    int
+	SiteWindow       WindowType
+	AppFailureRate   float64
+	AppMinSample     int
+	AppWindow        WindowType
+}
+
+// DefaultEffectiveRules 由 DefaultRuleConfig 生成默认有效规则。
+func DefaultEffectiveRules() EffectiveRules {
+	return EffectiveRules{
+		IPThreshold:    DefaultRuleConfig.IPFailureThreshold,
+		IPWindow:       DefaultRuleConfig.IPWindow,
+		BINThreshold:   DefaultRuleConfig.BINFailureThreshold,
+		BINWindow:      DefaultRuleConfig.BINWindow,
+		AppFailureRate: DefaultRuleConfig.AppFailureRateThreshold,
+		AppMinSample:   DefaultRuleConfig.AppMinSampleSize,
+		AppWindow:      DefaultRuleConfig.AppWindow,
+	}
 }
 
 // RuleConfig 规则配置

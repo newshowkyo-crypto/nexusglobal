@@ -46,16 +46,16 @@ func (s *Service) GenerateDocument(ctx context.Context, orderID uuid.UUID, docTy
 	}
 
 	// 生成 PDF 内容（模拟）
-	pdfContent := s.generatePDFContent(sourceData, docType)
+	pdfContent := s.generateDocumentPayload(sourceData, docType)
 
 	doc := &RFIDocument{
-		ID:             uuid.New(),
-		OrderID:        orderID,
-		MerchantID:     uuid.MustParse(sourceData.MerchantID),
-		DocumentType:   docType,
-		SourceDataHash: sourceHash,
-		Status:         status,
-		PDFContent:     pdfContent,
+		ID:              uuid.New(),
+		OrderID:         orderID,
+		MerchantID:      uuid.MustParse(sourceData.MerchantID),
+		DocumentType:    docType,
+		SourceDataHash:  sourceHash,
+		Status:          status,
+		DocumentPayload: pdfContent,
 		Metadata: map[string]interface{}{
 			"order_id":         sourceData.OrderID,
 			"merchant_id":      sourceData.MerchantID,
@@ -94,8 +94,8 @@ func (s *Service) RejectDocument(ctx context.Context, id uuid.UUID, operator str
 	return s.repo.UpdateDocumentStatus(ctx, id, DocumentStatusRejected, operator, &reason)
 }
 
-// generatePDFContent 生成 PDF 内容（模拟实现）
-func (s *Service) generatePDFContent(sourceData *OrderSourceData, docType DocumentType) []byte {
+// generateDocumentPayload 生成 PDF 内容（模拟实现）
+func (s *Service) generateDocumentPayload(sourceData *OrderSourceData, docType DocumentType) []byte {
 	content := []byte("RFI Document\n")
 	content = append(content, []byte("Order ID: "+sourceData.OrderID+"\n")...)
 	content = append(content, []byte("Merchant ID: "+sourceData.MerchantID+"\n")...)

@@ -6,16 +6,23 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/nexusglobal/mamr/internal/risk/carding/domain"
 )
+
+// RuleResolver 有效阈值解析器（P6）。*RuleStore 为其生产实现。
+type RuleResolver interface {
+	Resolve(ctx context.Context, merchantID uuid.UUID, siteID string, channelID uuid.UUID) (domain.EffectiveRules, error)
+}
 
 // Gateway Redis 滑动窗口风控网关
 type Gateway struct {
 	rdb         *redis.Client
 	logger      *slog.Logger
 	ruleConfig  domain.RuleConfig
+	ruleStore   RuleResolver
 	failOpen    bool          // Redis 不可用时是否 fail-open（local/mock 用）
 	luaIncr     *redis.Script // Lua 脚本：原子 INCR + EXPIRE
 	luaGetCount *redis.Script // Lua 脚本：获取滑动窗口计数
@@ -82,6 +89,9 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 	return g
 }
 
+// SetRuleStore 注入表化规则存储（P6）；未注入时使用默认阈值。
+func (g *Gateway) SetRuleStore(store RuleResolver) { g.ruleStore = store }
+
 // Check 检查请求是否应该被拦截
 func (g *Gateway) Check(ctx context.Context, req domain.CheckRequest) domain.CheckResult {
 	// Redis 不可用时的处理
@@ -100,81 +110,105 @@ func (g *Gateway) Check(ctx context.Context, req domain.CheckRequest) domain.Che
 		}
 	}
 
-	// 根据策略模式获取调整后的阈值配置
-	effectiveConfig := g.getEffectiveConfig(req.StrategyMode)
+	effective := g.effectiveRules(ctx, req)
+	applyStrategyMode(&effective, req.StrategyMode)
 
 	now := time.Now().UnixMilli()
 
-	// 1. 检查 IP 维度
-	ipHash := domain.HashIP(req.BuyerIP)
-	ipKey := fmt.Sprintf("carding:ip:%s", ipHash)
-	ipWindowMs := domain.WindowToSeconds(effectiveConfig.IPWindow) * 1000
-
-	ipCount, err := g.luaIncr.Run(ctx, g.rdb, []string{ipKey}, ipWindowMs, now).Int()
-	if err != nil {
-		g.logger.Error("lua incr failed for ip", "err", err, "ip_hash", ipHash)
-		if g.failOpen {
-			return domain.CheckResult{Decision: domain.DecisionAllow, Reason: "redis_error_fail_open"}
-		}
-		return domain.CheckResult{Decision: domain.DecisionBlock, Reason: "redis_error_fail_closed"}
-	}
-
-	if ipCount > effectiveConfig.IPFailureThreshold {
-		return g.makeBlockResult(req.StrategyMode, "ip_threshold_exceeded", effectiveConfig.IPWindow,
-			effectiveConfig.IPFailureThreshold, ipCount, domain.DimensionBuyerIP)
-	}
-
-	// 2. 检查 BIN 维度（如果有）
-	if req.CardBIN != "" {
-		binHash := domain.HashBIN(req.CardBIN)
-		binKey := fmt.Sprintf("carding:bin:%s", binHash)
-		binWindowMs := domain.WindowToSeconds(effectiveConfig.BINWindow) * 1000
-
-		binCount, err := g.luaIncr.Run(ctx, g.rdb, []string{binKey}, binWindowMs, now).Int()
+	// 1. IP 维度
+	if effective.IPThreshold > 0 {
+		ipHash := domain.HashIP(req.BuyerIP)
+		key := fmt.Sprintf("carding:ip:%s", ipHash)
+		count, err := g.bump(ctx, key, effective.IPWindow, now)
 		if err != nil {
-			g.logger.Error("lua incr failed for bin", "err", err, "bin_hash", binHash)
-			if g.failOpen {
-				return domain.CheckResult{Decision: domain.DecisionAllow, Reason: "redis_error_fail_open"}
-			}
-			return domain.CheckResult{Decision: domain.DecisionBlock, Reason: "redis_error_fail_closed"}
+			return g.redisErrResult(err)
 		}
-
-		if binCount > effectiveConfig.BINFailureThreshold {
-			return g.makeBlockResult(req.StrategyMode, "bin_threshold_exceeded", effectiveConfig.BINWindow,
-				effectiveConfig.BINFailureThreshold, binCount, domain.DimensionCardBIN)
+		if count > effective.IPThreshold {
+			return g.makeBlockResult(req.StrategyMode, "ip_threshold_exceeded", effective.IPWindow,
+				effective.IPThreshold, count, domain.DimensionBuyerIP)
 		}
 	}
 
-	// 3. 检查 App 维度（失败率）
+	// 2. BIN 维度
+	if req.CardBIN != "" && effective.BINThreshold > 0 {
+		binHash := domain.HashBIN(req.CardBIN)
+		key := fmt.Sprintf("carding:bin:%s", binHash)
+		count, err := g.bump(ctx, key, effective.BINWindow, now)
+		if err != nil {
+			return g.redisErrResult(err)
+		}
+		if count > effective.BINThreshold {
+			return g.makeBlockResult(req.StrategyMode, "bin_threshold_exceeded", effective.BINWindow,
+				effective.BINThreshold, count, domain.DimensionCardBIN)
+		}
+	}
+
+	// 3. 设备维度
+	if req.DeviceID != "" && effective.DeviceThreshold > 0 {
+		key := fmt.Sprintf("carding:device:%s", domain.HashDevice(req.DeviceID))
+		count, err := g.bump(ctx, key, effective.DeviceWindow, now)
+		if err != nil {
+			return g.redisErrResult(err)
+		}
+		if count > effective.DeviceThreshold {
+			return g.makeBlockResult(req.StrategyMode, "device_threshold_exceeded", effective.DeviceWindow,
+				effective.DeviceThreshold, count, domain.DimensionDevice)
+		}
+	}
+
+	// 4. 通道维度（池化）
+	if req.ChannelID != uuid.Nil && effective.ChannelThreshold > 0 {
+		key := fmt.Sprintf("carding:channel:%s", req.ChannelID.String())
+		count, err := g.bump(ctx, key, effective.ChannelWindow, now)
+		if err != nil {
+			return g.redisErrResult(err)
+		}
+		if count > effective.ChannelThreshold {
+			return g.makeBlockResult(req.StrategyMode, "channel_threshold_exceeded", effective.ChannelWindow,
+				effective.ChannelThreshold, count, domain.DimensionChannel)
+		}
+	}
+
+	// 5. 站点维度（池化）
+	if req.SiteID != "" && effective.SiteThreshold > 0 {
+		key := fmt.Sprintf("carding:site:%s", req.SiteID)
+		count, err := g.bump(ctx, key, effective.SiteWindow, now)
+		if err != nil {
+			return g.redisErrResult(err)
+		}
+		if count > effective.SiteThreshold {
+			return g.makeBlockResult(req.StrategyMode, "site_threshold_exceeded", effective.SiteWindow,
+				effective.SiteThreshold, count, domain.DimensionSite)
+		}
+	}
+
+	// 6. App 维度（失败率）
 	appKey := fmt.Sprintf("carding:app:%s:total", req.AppID)
 	appFailKey := fmt.Sprintf("carding:app:%s:fail", req.AppID)
-	appWindowMs := domain.WindowToSeconds(effectiveConfig.AppWindow) * 1000
+	appWindowMs := domain.WindowToSeconds(effective.AppWindow) * 1000
 
-	// 获取总数和失败数（不增加，只查询）
 	totalCount, err := g.luaGetCount.Run(ctx, g.rdb, []string{appKey}, appWindowMs, now).Int()
 	if err != nil {
 		g.logger.Error("lua get count failed for app total", "err", err, "app_id", req.AppID)
 	}
-
 	failCount, err := g.luaGetCount.Run(ctx, g.rdb, []string{appFailKey}, appWindowMs, now).Int()
 	if err != nil {
 		g.logger.Error("lua get count failed for app fail", "err", err, "app_id", req.AppID)
 	}
 
-	// 计算失败率
-	if totalCount >= effectiveConfig.AppMinSampleSize {
+	if effective.AppMinSample > 0 && totalCount >= effective.AppMinSample {
 		failRate := float64(failCount) / float64(totalCount) * 100
-		if failRate >= effectiveConfig.AppFailureRateThreshold {
-			return g.makeBlockResult(req.StrategyMode, "app_failure_rate_exceeded", effectiveConfig.AppWindow,
-				int(effectiveConfig.AppFailureRateThreshold), int(failRate), domain.DimensionAppID)
+		if failRate >= effective.AppFailureRate {
+			return g.makeBlockResult(req.StrategyMode, "app_failure_rate_exceeded", effective.AppWindow,
+				int(effective.AppFailureRate), int(failRate), domain.DimensionAppID)
 		}
 	}
 
-	// 4. 检查商户冷却期（如果有）
+	// 7. 商户冷却期
 	cooldownKey := fmt.Sprintf("carding:cooldown:%s", req.MerchantID.String())
 	cooldownExists, err := g.rdb.Exists(ctx, cooldownKey).Result()
 	if err == nil && cooldownExists > 0 {
-		result := g.makeBlockResult(req.StrategyMode, "merchant_in_cooldown", effectiveConfig.IPWindow,
+		result := g.makeBlockResult(req.StrategyMode, "merchant_in_cooldown", effective.IPWindow,
 			0, 0, domain.DimensionMerchantID)
 		result.Decision = domain.DecisionCooldown
 		return result
@@ -187,31 +221,67 @@ func (g *Gateway) Check(ctx context.Context, req domain.CheckRequest) domain.Che
 	}
 }
 
-// getEffectiveConfig 根据策略模式获取有效的规则配置
-func (g *Gateway) getEffectiveConfig(strategyMode domain.ChannelStrategyMode) domain.RuleConfig {
-	config := g.ruleConfig
-
-	switch strategyMode {
-	case domain.ChannelStrategyModeStrict:
-		// STRICT 模式：阈值降低到 50%
-		config.IPFailureThreshold = config.IPFailureThreshold * 50 / 100
-		if config.IPFailureThreshold < 1 {
-			config.IPFailureThreshold = 1
-		}
-		config.BINFailureThreshold = config.BINFailureThreshold * 50 / 100
-		if config.BINFailureThreshold < 1 {
-			config.BINFailureThreshold = 1
-		}
-		config.AppFailureRateThreshold = config.AppFailureRateThreshold * 50 / 100
-	case domain.ChannelStrategyModeManualReview:
-		// MANUAL_REVIEW 模式：保持默认阈值，但返回 CHALLENGE 而非 BLOCK
-	case domain.ChannelStrategyModeDefault:
-		// DEFAULT 模式：使用默认配置
-	default:
-		// 未知模式：使用默认配置
+// effectiveRules 解析有效阈值：优先表化规则，失败时回退默认值。
+func (g *Gateway) effectiveRules(ctx context.Context, req domain.CheckRequest) domain.EffectiveRules {
+	if g.ruleStore == nil {
+		return effectiveFromConfig(g.ruleConfig)
 	}
+	rules, err := g.ruleStore.Resolve(ctx, req.MerchantID, req.SiteID, req.ChannelID)
+	if err != nil {
+		g.logger.Warn("risk rule resolve failed, fallback to defaults", "err", err)
+		return effectiveFromConfig(g.ruleConfig)
+	}
+	return rules
+}
 
-	return config
+// bump 在滑动窗口内计数 +1。
+func (g *Gateway) bump(ctx context.Context, key string, window domain.WindowType, now int64) (int, error) {
+	windowMs := domain.WindowToSeconds(window) * 1000
+	return g.luaIncr.Run(ctx, g.rdb, []string{key}, windowMs, now).Int()
+}
+
+func (g *Gateway) redisErrResult(err error) domain.CheckResult {
+	g.logger.Error("risk gateway redis operation failed", "err", err)
+	if g.failOpen {
+		return domain.CheckResult{Decision: domain.DecisionAllow, Reason: "redis_error_fail_open"}
+	}
+	return domain.CheckResult{Decision: domain.DecisionBlock, Reason: "redis_error_fail_closed"}
+}
+
+// effectiveFromConfig 由硬编码默认配置生成有效阈值。
+func effectiveFromConfig(cfg domain.RuleConfig) domain.EffectiveRules {
+	return domain.EffectiveRules{
+		IPThreshold:    cfg.IPFailureThreshold,
+		IPWindow:       cfg.IPWindow,
+		BINThreshold:   cfg.BINFailureThreshold,
+		BINWindow:      cfg.BINWindow,
+		AppFailureRate: cfg.AppFailureRateThreshold,
+		AppMinSample:   cfg.AppMinSampleSize,
+		AppWindow:      cfg.AppWindow,
+	}
+}
+
+// applyStrategyMode STRICT 模式收紧阈值（50%，下限 1）。
+func applyStrategyMode(rules *domain.EffectiveRules, mode domain.ChannelStrategyMode) {
+	if mode != domain.ChannelStrategyModeStrict {
+		return
+	}
+	half := func(v int) int {
+		if v <= 0 {
+			return v
+		}
+		out := v * 50 / 100
+		if out < 1 {
+			out = 1
+		}
+		return out
+	}
+	rules.IPThreshold = half(rules.IPThreshold)
+	rules.BINThreshold = half(rules.BINThreshold)
+	rules.DeviceThreshold = half(rules.DeviceThreshold)
+	rules.ChannelThreshold = half(rules.ChannelThreshold)
+	rules.SiteThreshold = half(rules.SiteThreshold)
+	rules.AppFailureRate = rules.AppFailureRate * 50 / 100
 }
 
 // makeBlockResult 根据策略模式生成拦截结果

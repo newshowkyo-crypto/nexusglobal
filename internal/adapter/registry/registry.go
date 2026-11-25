@@ -75,6 +75,9 @@ type Repository interface {
 	// GetAdapterChannelsByType 获取指定类型的通道
 	GetAdapterChannelsByType(ctx context.Context, tenantID uuid.UUID, adapterType domain.AdapterType) ([]domain.AdapterChannel, error)
 
+	// GetAllAdapterChannels 获取所有通道（不分租户，启动时预加载用）
+	GetAllAdapterChannels(ctx context.Context) ([]domain.AdapterChannel, error)
+
 	// GetAdapterCredential 获取凭证
 	GetAdapterCredential(ctx context.Context, providerID uuid.UUID, channelID *uuid.UUID, credType domain.CredentialType) (*domain.AdapterCredentialVault, error)
 
@@ -112,14 +115,14 @@ func NewUniversalAdapterRegistry(cfg RegistryConfig) *UniversalAdapterRegistry {
 // LoadAll 加载所有适配器通道
 // 启动时调用，可能访问 PG/KMS
 func (r *UniversalAdapterRegistry) LoadAll(ctx context.Context) error {
-	// 获取所有租户的通道（简化：假设只有一个租户或从配置获取）
-	// 实际实现应根据业务需求调整
-
-	// TODO: 从配置或数据库获取所有租户ID
-	// 这里先使用一个占位实现
 	r.logger.Info("loading all adapter channels")
 
-	// 初始化空索引
+	channels, err := r.repo.GetAllAdapterChannels(ctx)
+	if err != nil {
+		r.logger.Error("failed to get all adapter channels", "err", err)
+		return err
+	}
+
 	r.mu.Lock()
 	r.bundles = make(map[uuid.UUID]*domain.AdapterBundle)
 	r.byType = make(map[domain.AdapterType]map[uuid.UUID]*domain.AdapterBundle)
@@ -127,6 +130,55 @@ func (r *UniversalAdapterRegistry) LoadAll(ctx context.Context) error {
 	r.byEntity = make(map[uuid.UUID]map[uuid.UUID]*domain.AdapterBundle)
 	r.mu.Unlock()
 
+	for _, channel := range channels {
+		bundle, err := r.loadBundle(ctx, channel)
+		if err != nil {
+			r.logger.Error("failed to load bundle",
+				"channel_id", channel.ID,
+				"channel_code", channel.ChannelCode,
+				"adapter_type", channel.AdapterType,
+				"err", err)
+
+			bundle = &domain.AdapterBundle{
+				ChannelID:   channel.ID,
+				ChannelCode: channel.ChannelCode,
+				AdapterType: channel.AdapterType,
+				IsActive:    false,
+				LoadError:   err,
+				LoadedAt:    time.Now(),
+			}
+		}
+
+		r.mu.Lock()
+		r.bundles[channel.ID] = bundle
+
+		if r.byType[bundle.AdapterType] == nil {
+			r.byType[bundle.AdapterType] = make(map[uuid.UUID]*domain.AdapterBundle)
+		}
+		r.byType[bundle.AdapterType][channel.ID] = bundle
+
+		if r.byTenant[channel.TenantID] == nil {
+			r.byTenant[channel.TenantID] = make(map[uuid.UUID]*domain.AdapterBundle)
+		}
+		r.byTenant[channel.TenantID][channel.ID] = bundle
+
+		if channel.CorporateEntityID != nil {
+			if r.byEntity[*channel.CorporateEntityID] == nil {
+				r.byEntity[*channel.CorporateEntityID] = make(map[uuid.UUID]*domain.AdapterBundle)
+			}
+			r.byEntity[*channel.CorporateEntityID][channel.ID] = bundle
+		}
+		r.mu.Unlock()
+
+		r.logger.Info("adapter channel loaded",
+			"channel_id", channel.ID,
+			"channel_code", channel.ChannelCode,
+			"adapter_type", channel.AdapterType,
+			"provider_id", channel.ProviderID,
+			"version", channel.Version)
+	}
+
+	r.logger.Info("all adapter channels loaded", "count", len(channels))
 	return nil
 }
 
@@ -487,6 +539,13 @@ func (r *UniversalAdapterRegistry) createCardAcquirerClient(p *domain.AdapterPro
 	// 从 p.ProviderCode 判断具体是哪个卡网
 	switch strings.ToLower(p.ProviderCode) {
 	case "mock":
+		// mock 是显式声明的 mock provider，仅允许在非 real 模式（local/test）使用。
+		// real/production 模式下 mock provider 必须拒绝启动。
+		if r.isRealMode {
+			r.logger.Error("mock card acquirer provider not allowed in real mode",
+				"provider_code", p.ProviderCode)
+			return nil, fmt.Errorf("mock card acquirer provider not allowed in real mode: %s", p.ProviderCode)
+		}
 		return provider.NewMockCardAcquirer(webhookSecret, channelConfig)
 
 	case "stripe":
@@ -495,17 +554,16 @@ func (r *UniversalAdapterRegistry) createCardAcquirerClient(p *domain.AdapterPro
 	case "nxtapay":
 		return provider.NewNxtapayCardAcquirer(apiKey, apiSecret, webhookSecret, channelConfig)
 
+	case "hyperswitch":
+		return provider.NewHyperswitchCardAcquirer(apiKey, webhookSecret, channelConfig)
+
 	default:
-		// Real/production 模式下，未知 provider_code 必须 fail-closed
-		if r.isRealMode {
-			r.logger.Error("unknown card acquirer provider in real mode, fail-closed",
-				"provider_code", p.ProviderCode)
-			return nil, fmt.Errorf("unknown card acquirer provider in real mode: %s", p.ProviderCode)
-		}
-		// 非 real 模式（mock/local）允许 fallback 到 mock
-		r.logger.Warn("unknown card acquirer provider, using mock",
-			"provider_code", p.ProviderCode)
-		return provider.NewMockCardAcquirer(webhookSecret, channelConfig)
+		// G06: 未知 provider_code 一律拒绝，禁止回退 mock。
+		// 旧逻辑在非 real 模式下 fallback 到 mock，导致非 mock VCC 配置接 Mock bridge。
+		r.logger.Error("unknown card acquirer provider, fail-closed (no mock fallback)",
+			"provider_code", p.ProviderCode,
+			"is_real_mode", r.isRealMode)
+		return nil, fmt.Errorf("unknown card acquirer provider %q: no mock fallback (UNSUPPORTED_CAPABILITY)", p.ProviderCode)
 	}
 }
 

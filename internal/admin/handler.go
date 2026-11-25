@@ -1,11 +1,13 @@
 package admin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,16 +20,18 @@ import (
 	"github.com/nexusglobal/mamr/internal/payout/domain"
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
+	"github.com/nexusglobal/mamr/internal/platform/httpx"
 	"github.com/nexusglobal/mamr/pkg/validator"
 )
 
 type Handler struct {
 	pool      *pgxpool.Pool
 	encryptor *crypto.Encryptor
+	svc       *ApprovalService // P0-9: 敏感操作委托给审批服务
 }
 
 func NewHandler(pool *pgxpool.Pool, encryptor *crypto.Encryptor) *Handler {
-	return &Handler{pool: pool, encryptor: encryptor}
+	return &Handler{pool: pool, encryptor: encryptor, svc: NewApprovalService(pool, nil)}
 }
 
 // ── Stats ──
@@ -35,6 +39,19 @@ func NewHandler(pool *pgxpool.Pool, encryptor *crypto.Encryptor) *Handler {
 func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	stats := map[string]interface{}{}
+
+	// UI-010: 总览卡片所需计数与 dashboard JS 渲染键对齐
+	var adapterProviderCount, adapterChannelCount, entityCount, bridgeProfileCount, walletPolicyCount int
+	h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM adapter_provider`).Scan(&adapterProviderCount)
+	stats["adapter_provider_count"] = adapterProviderCount
+	h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM adapter_channel`).Scan(&adapterChannelCount)
+	stats["adapter_channel_count"] = adapterChannelCount
+	h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM corporate_entity`).Scan(&entityCount)
+	stats["entity_count"] = entityCount
+	h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM bridge_profile`).Scan(&bridgeProfileCount)
+	stats["bridge_profile_count"] = bridgeProfileCount
+	h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM transit_wallet_policy`).Scan(&walletPolicyCount)
+	stats["wallet_policy_count"] = walletPolicyCount
 
 	var maeCount int
 	h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM mae_configuration`).Scan(&maeCount)
@@ -175,14 +192,19 @@ func (h *Handler) GetMAE(w http.ResponseWriter, r *http.Request) {
 // ── Payout ──
 
 func (h *Handler) ListPayouts(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := requireAdminTenant(w, r)
+	if !ok {
+		return
+	}
 	ctx := r.Context()
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 	status := r.URL.Query().Get("status")
 
-	query := `SELECT id::text, merchant_id::text, amount::text, fiat_currency, target_asset, target_network, status, idempotency_key, version, created_at::text, updated_at::text FROM payout_request`
-	args := []interface{}{}
+	query := `SELECT id::text, merchant_id::text, amount::text, fiat_currency, target_asset, target_network, status, idempotency_key, version, created_at::text, updated_at::text
+		FROM payout_request p WHERE EXISTS(SELECT 1 FROM corporate_entity e WHERE e.id=p.merchant_id AND e.tenant_id=$1)`
+	args := []interface{}{tenant}
 	if status != "" {
-		query += " WHERE status = $1"
+		query += " AND status = $2"
 		args = append(args, status)
 	}
 	query += " ORDER BY created_at DESC LIMIT $" + strconv.Itoa(len(args)+1)
@@ -199,7 +221,10 @@ func (h *Handler) ListPayouts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, merchantID, amount, fiat, asset, network, statusVal, idemKey, created, updated string
 		var version int32
-		rows.Scan(&id, &merchantID, &amount, &fiat, &asset, &network, &statusVal, &idemKey, &version, &created, &updated)
+		if err := rows.Scan(&id, &merchantID, &amount, &fiat, &asset, &network, &statusVal, &idemKey, &version, &created, &updated); err != nil {
+			writeErr(w, err)
+			return
+		}
 		items = append(items, map[string]interface{}{
 			"id": id, "merchant_id": merchantID, "amount": amount,
 			"fiat_currency": fiat, "target_asset": asset, "target_network": network,
@@ -207,10 +232,18 @@ func (h *Handler) ListPayouts(w http.ResponseWriter, r *http.Request) {
 			"created_at": created, "updated_at": updated,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		writeErr(w, err)
+		return
+	}
 	writeJSON(w, map[string]interface{}{"items": items, "total": len(items)})
 }
 
 func (h *Handler) GetPayout(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := requireAdminTenant(w, r)
+	if !ok {
+		return
+	}
 	ctx := r.Context()
 	idStr := chi.URLParam(r, "id")
 	id, err := uuid.Parse(idStr)
@@ -222,7 +255,7 @@ func (h *Handler) GetPayout(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.pool.Query(ctx,
 		`SELECT merchant_id::text, payout_address_id::text, amount::text, fiat_currency, target_asset, target_network,
 		 status, idempotency_key, provider_ref, lock_id, version, created_at::text, updated_at::text
-		 FROM payout_request WHERE id = $1`, id)
+		 FROM payout_request p WHERE id = $1 AND EXISTS(SELECT 1 FROM corporate_entity e WHERE e.id=p.merchant_id AND e.tenant_id=$2)`, id, tenant)
 	if err != nil {
 		writeErr(w, apperr.ErrNotFound.WithMessage("payout not found"))
 		return
@@ -236,8 +269,11 @@ func (h *Handler) GetPayout(w http.ResponseWriter, r *http.Request) {
 
 	var merchantID, addrID, amount, fiat, asset, network, statusVal, idemKey, providerRef, lockID, created, updated string
 	var version int32
-	rows.Scan(&merchantID, &addrID, &amount, &fiat, &asset, &network,
-		&statusVal, &idemKey, &providerRef, &lockID, &version, &created, &updated)
+	if err := rows.Scan(&merchantID, &addrID, &amount, &fiat, &asset, &network,
+		&statusVal, &idemKey, &providerRef, &lockID, &version, &created, &updated); err != nil {
+		writeErr(w, err)
+		return
+	}
 
 	writeJSON(w, map[string]interface{}{
 		"id": id.String(), "merchant_id": merchantID, "payout_address_id": addrID,
@@ -252,7 +288,7 @@ func (h *Handler) GetPayout(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListOutbox(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 	status := r.URL.Query().Get("status")
 
 	query := `SELECT id::text, aggregate_type, aggregate_id::text, event_type, idempotency_key, status, retry_count, created_at::text, updated_at::text FROM transactional_outbox`
@@ -392,7 +428,7 @@ func (h *Handler) ListSweepRules(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListSweepTransfers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 	rows, err := h.pool.Query(ctx,
 		`SELECT id::text, sweep_rule_id::text, amount_minor, currency, rail, status, idempotency_key, bank_ref, version, created_at::text
 		 FROM sweep_transfer ORDER BY created_at DESC LIMIT $1`, limit)
@@ -421,7 +457,7 @@ func (h *Handler) ListSweepTransfers(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListWebhookEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 	providerType := r.URL.Query().Get("provider_type")
 
 	query := `SELECT id::text, provider_type, provider_id, provider_event_id, event_type, idempotency_key, status, created_at::text FROM webhook_ingress_event`
@@ -493,7 +529,7 @@ func (h *Handler) GetWebhookEvent(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListLedgerTransactions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 	rows, err := h.pool.Query(ctx,
 		`SELECT id::text, idempotency_key, transaction_type, aggregate_type, description, created_at::text
 		 FROM ledger_transaction ORDER BY created_at DESC LIMIT $1`, limit)
@@ -580,10 +616,94 @@ func (h *Handler) ListMerchants(w http.ResponseWriter, r *http.Request) {
 
 // ── helpers ──
 
+// createPendingApproval 创建 PENDING 审批请求（P0-9: 敏感操作不直接修改业务表）
+//
+// 身份从已验证 Context 获取（RED-15），拒绝 body 中伪造的 requester。
+// 返回创建的审批 ID。
+func (h *Handler) createPendingApproval(ctx context.Context, actionType, targetType string, targetID *string, payload map[string]interface{}, reason string) (string, error) {
+	identity, ok := httpx.GetAdminIdentity(ctx)
+	if !ok || identity == nil {
+		return "", apperr.ErrForbidden.WithMessage("admin identity not found in authenticated context")
+	}
+	requester := identity.Username
+	if requester == "" {
+		requester = identity.Subject
+	}
+	if requester == "" || requester == "unknown" {
+		return "", apperr.ErrForbidden.WithMessage("requester identity not found in authenticated context")
+	}
+
+	if reason == "" {
+		reason = actionType + " request"
+	}
+
+	// P0-5: 审批 payload 递归脱敏，凭证字段不得原样落库
+	sanitizedPayload := SanitizeMap(payload)
+	payloadJSON, _ := json.Marshal(sanitizedPayload)
+
+	var targetUUID *uuid.UUID
+	if targetID != nil && *targetID != "" {
+		if tid, err := uuid.Parse(*targetID); err == nil {
+			targetUUID = &tid
+		}
+	}
+
+	var tenantID *uuid.UUID
+	if identity.TenantID != "" {
+		if tid, err := uuid.Parse(identity.TenantID); err == nil {
+			tenantID = &tid
+		}
+	}
+
+	var id uuid.UUID
+	// ADM-007/ADM-003: view（requested_payload）全脱敏；execution（validated_payload）
+	// 保留 vault:// 引用、密钥值仍脱敏
+	execJSON, _ := json.Marshal(SanitizeMapForExecution(payload))
+	err := h.pool.QueryRow(ctx, `
+		INSERT INTO admin_approval_requests (
+			tenant_id, action_type, target_type, target_id,
+			requested_payload, validated_payload, requester, requester_role, reason, status
+		) VALUES (
+			$1, $2, $3, $4,
+			$5::jsonb, $6::jsonb, $7, $8, $9, 'PENDING'
+		)
+		RETURNING id
+	`, tenantID, actionType, targetType, targetUUID,
+		string(payloadJSON), string(execJSON), requester, identity.Role, reason,
+	).Scan(&id)
+	if err != nil {
+		return "", apperr.ErrInternal.WithMessage("failed to create approval request: " + err.Error())
+	}
+
+	return id.String(), nil
+}
+
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// ADM-015: 默认不发 CORS 头（管理端为同源/内部使用）；如需跨域须显式 allowlist
 	json.NewEncoder(w).Encode(v)
+}
+
+// queryLimit 解析 limit 参数并钳制到 [1, 500]（ADM-017：列表 limit 无上限会放大查询压力）。
+func queryLimit(r *http.Request, def int) int {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		if def < 1 {
+			def = 50
+		}
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 50
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > 500 {
+		return 500
+	}
+	return n
 }
 
 func writeErr(w http.ResponseWriter, err error) {
@@ -596,9 +716,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// ADM-016: 不回显底层错误细节，只返回稳定 code
 	w.WriteHeader(500)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"error": map[string]interface{}{"code": "INTERNAL", "message": err.Error()},
+		"error": map[string]interface{}{"code": "INTERNAL", "message": "internal server error"},
 	})
 }
 
@@ -686,14 +807,16 @@ func (h *Handler) CreateMAEConfig(w http.ResponseWriter, r *http.Request) {
 		TenantID: req.MAEID, RecordID: "mae_configuration", FieldName: "api_key",
 	})
 	if err != nil {
-		writeErr(w, apperr.ErrInternal.WithMessage("encrypt api_key: "+err.Error()))
+		slog.Error("encrypt api_key failed", "err", err)
+		writeErr(w, apperr.ErrInternal.WithMessage("failed to encrypt api key"))
 		return
 	}
 	webhookSecretEnc, err := h.encryptor.Encrypt(ctx, []byte(req.WebhookSecret), crypto.Meta{
 		TenantID: req.MAEID, RecordID: "mae_configuration", FieldName: "webhook_secret",
 	})
 	if err != nil {
-		writeErr(w, apperr.ErrInternal.WithMessage("encrypt webhook_secret: "+err.Error()))
+		slog.Error("encrypt webhook_secret failed", "err", err)
+		writeErr(w, apperr.ErrInternal.WithMessage("failed to encrypt webhook secret"))
 		return
 	}
 
@@ -791,7 +914,8 @@ func (h *Handler) CreateWebhookProxy(w http.ResponseWriter, r *http.Request) {
 		TenantID: req.ProviderID, RecordID: "webhook_receiver_proxy", FieldName: "secret",
 	})
 	if err != nil {
-		writeErr(w, apperr.ErrInternal.WithMessage("encrypt secret: "+err.Error()))
+		slog.Error("encrypt webhook secret failed", "err", err)
+		writeErr(w, apperr.ErrInternal.WithMessage("failed to encrypt secret"))
 		return
 	}
 
@@ -892,6 +1016,10 @@ func (h *Handler) CreateBankAccount(w http.ResponseWriter, r *http.Request) {
 
 // CreatePayoutAddress 创建出金地址
 func (h *Handler) CreatePayoutAddress(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := requireAdminTenant(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		MerchantID    string `json:"merchant_id"`
 		TargetAsset   string `json:"target_asset"`
@@ -906,7 +1034,11 @@ func (h *Handler) CreatePayoutAddress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	merchantID, _ := uuid.Parse(req.MerchantID)
+	merchantID, err := uuid.Parse(req.MerchantID)
+	if err != nil || merchantID == uuid.Nil {
+		writeErr(w, apperr.ErrInvalidArgument.WithMessage("invalid merchant id"))
+		return
+	}
 
 	// R3-3 复修：出金地址经 domain.CleanAddress 做格式校验/哈希/掩码，
 	// 再经 Encryptor 加密后存 target_address_enc（之前直接存明文 + 把地址当 hash 是双重错误）。
@@ -923,7 +1055,8 @@ func (h *Handler) CreatePayoutAddress(w http.ResponseWriter, r *http.Request) {
 		TenantID: merchantID.String(), RecordID: "payout_address", FieldName: "target_address",
 	})
 	if err != nil {
-		writeErr(w, apperr.ErrInternal.WithMessage("encrypt address: "+err.Error()))
+		slog.Error("encrypt payout address failed", "err", err)
+		writeErr(w, apperr.ErrInternal.WithMessage("failed to encrypt address"))
 		return
 	}
 
@@ -933,10 +1066,15 @@ func (h *Handler) CreatePayoutAddress(w http.ResponseWriter, r *http.Request) {
 			merchant_id, target_asset, target_network, address_format_type,
 			target_address_enc, target_address_hash, target_address_masked,
 			address_label, screening_status, whitelist_status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending', 'Pending') RETURNING id`,
+		) SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'Pending', 'Pending'
+		  WHERE EXISTS(SELECT 1 FROM corporate_entity WHERE id=$1 AND tenant_id=$9) RETURNING id`,
 		merchantID, req.TargetAsset, req.TargetNetwork, req.FormatType,
-		addressEnc, cleaned.AddressHash, cleaned.TargetAddressMasked, req.AddressLabel,
+		addressEnc, cleaned.AddressHash, cleaned.TargetAddressMasked, req.AddressLabel, tenant,
 	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, apperr.ErrNotFound.WithMessage("merchant not found"))
+		return
+	}
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -964,7 +1102,7 @@ func (h *Handler) ListAdapterProviders(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&id, &code, &name, &adapterType, &config, &status, &created, &updated)
 		items = append(items, map[string]interface{}{
 			"id": id, "provider_code": code, "provider_name": name, "adapter_type": adapterType,
-			"provider_config": config, "status": status,
+			"provider_config": sanitizeJSONText(config), "status": status,
 			"created_at": created, "updated_at": updated,
 		})
 	}
@@ -989,9 +1127,10 @@ func (h *Handler) CreateAdapterProvider(w http.ResponseWriter, r *http.Request) 
 
 	ctx := r.Context()
 	var id uuid.UUID
+	// P0-4: 新建适配器提供商默认 DISABLED，需经 ENABLE_ADAPTER_PROVIDER 审批后启用
 	err := h.pool.QueryRow(ctx,
 		`INSERT INTO adapter_provider (provider_code, provider_name, adapter_type, provider_config, status)
-		 VALUES ($1, $2, $3, $4, 'ACTIVE') RETURNING id`,
+		 VALUES ($1, $2, $3, $4, 'DISABLED') RETURNING id`,
 		req.ProviderCode, req.ProviderName, req.AdapterType, req.ProviderConfig,
 	).Scan(&id)
 	if err != nil {
@@ -1023,25 +1162,30 @@ func (h *Handler) UpdateAdapterProvider(w http.ResponseWriter, r *http.Request) 
 		req.ProviderConfig = json.RawMessage("{}")
 	}
 
+	// P0-4: 更新适配器提供商走 Maker-Checker 审批，不直接修改业务表
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx,
-		`UPDATE adapter_provider SET provider_name = $1, provider_config = $2, updated_at = now() WHERE id = $3`,
-		req.ProviderName, req.ProviderConfig, id,
-	)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionUpdateAdapterProvider, TargetTypeAdapterProvider, &idStr,
+		map[string]interface{}{
+			"provider_id":     idStr,
+			"provider_name":   req.ProviderName,
+			"provider_config": json.RawMessage(req.ProviderConfig),
+		},
+		"update adapter provider")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "updated"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
-// DeleteAdapterProvider 删除适配器提供商
+// DeleteAdapterProvider 删除适配器提供商 — P0-4: 改为经审批的软禁用，永不物理删除
 func (h *Handler) DeleteAdapterProvider(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		writeErr(w, errors.New("invalid provider id"))
+		writeErr(w, apperr.ErrInvalidArgument.WithMessage("invalid provider id"))
 		return
 	}
 
@@ -1055,17 +1199,21 @@ func (h *Handler) DeleteAdapterProvider(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if count > 0 {
-		writeErr(w, errors.New("cannot delete provider with existing channels"))
+		writeErr(w, errors.New("cannot disable provider with existing channels"))
 		return
 	}
 
-	_, err = h.pool.Exec(ctx, `DELETE FROM adapter_provider WHERE id = $1`, id)
+	// P0-4: 物理删除改为经审批的软禁用
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionDisableAdapterProvider, TargetTypeAdapterProvider, &idStr,
+		map[string]interface{}{"provider_id": idStr},
+		"disable adapter provider (replaces physical delete)")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "deleted"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) ListAdapterChannels(w http.ResponseWriter, r *http.Request) {
@@ -1087,13 +1235,29 @@ func (h *Handler) ListAdapterChannels(w http.ResponseWriter, r *http.Request) {
 		var id, tenantID, code, name, adapterType, providerCode, assets, networks, status, created, updated string
 		var version int32
 		rows.Scan(&id, &tenantID, &code, &name, &adapterType, &providerCode, &assets, &networks, &status, &version, &created, &updated)
+		// UI-007: jsonb::text 是 JSON 字符串，直接作为 string 序列化会二次编码，
+		// 前端 .join() 对 string 抛错。此处还原为真数组（非法 JSON 时降级为原字符串）。
+		assetsJSON := rawJSONOrString(assets)
+		networksJSON := rawJSONOrString(networks)
 		items = append(items, map[string]interface{}{
 			"id": id, "tenant_id": tenantID, "channel_code": code, "channel_name": name, "adapter_type": adapterType,
-			"provider_code": providerCode, "supported_assets": assets, "supported_networks": networks,
+			"provider_code": providerCode, "supported_assets": assetsJSON, "supported_networks": networksJSON,
 			"status": status, "version": version, "created_at": created, "updated_at": updated,
 		})
 	}
 	writeJSON(w, map[string]interface{}{"items": items, "total": len(items)})
+}
+
+// rawJSONOrString 将 jsonb::text 的输出还原为可序列化的 JSON 数组；解析失败时按字符串返回。
+func rawJSONOrString(s string) interface{} {
+	if s == "" {
+		return []interface{}{}
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return s
+	}
+	return v
 }
 
 func (h *Handler) CreateAdapterChannel(w http.ResponseWriter, r *http.Request) {
@@ -1203,13 +1367,16 @@ func (h *Handler) EnableAdapterChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE adapter_channel SET status = 'ACTIVE', updated_at = now() WHERE id = $1`, id)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionEnableAdapterChannel, TargetTypeAdapterChannel, &idStr,
+		map[string]interface{}{"channel_id": idStr},
+		"enable adapter channel")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "enabled"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) DisableAdapterChannel(w http.ResponseWriter, r *http.Request) {
@@ -1221,13 +1388,16 @@ func (h *Handler) DisableAdapterChannel(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE adapter_channel SET status = 'DISABLED', updated_at = now() WHERE id = $1`, id)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionDisableAdapterChannel, TargetTypeAdapterChannel, &idStr,
+		map[string]interface{}{"channel_id": idStr},
+		"disable adapter channel")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "disabled"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) ReloadAdapterChannel(w http.ResponseWriter, r *http.Request) {
@@ -1319,17 +1489,23 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ADM-002: 实体信息更新为高风险写，收敛到 Maker-Checker 审批
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx,
-		`UPDATE corporate_entity SET name = $1, legal_name = $2, jurisdiction = $3, updated_at = now() WHERE id = $4`,
-		req.Name, req.LegalName, req.Jurisdiction, id,
-	)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionUpdateCorporateEntity, TargetTypeCorporateEntity, &idStr,
+		map[string]interface{}{
+			"entity_id":    idStr,
+			"name":         req.Name,
+			"legal_name":   req.LegalName,
+			"jurisdiction": req.Jurisdiction,
+		},
+		"")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "updated"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) SetEntityRiskHold(w http.ResponseWriter, r *http.Request) {
@@ -1341,13 +1517,16 @@ func (h *Handler) SetEntityRiskHold(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE corporate_entity SET status = 'RISK_HOLD', updated_at = now() WHERE id = $1`, id)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionSetEntityRiskHold, TargetTypeCorporateEntity, &idStr,
+		map[string]interface{}{"entity_id": idStr},
+		"set entity risk hold")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "RISK_HOLD"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) EnableEntity(w http.ResponseWriter, r *http.Request) {
@@ -1359,13 +1538,17 @@ func (h *Handler) EnableEntity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE corporate_entity SET status = 'ACTIVE', updated_at = now() WHERE id = $1`, id)
+	// P0-4: 启用实体走 Maker-Checker 审批，不直接修改业务表
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionEnableEntity, TargetTypeCorporateEntity, &idStr,
+		map[string]interface{}{"entity_id": idStr},
+		"enable corporate entity")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "ACTIVE"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 // ── Asset Bridge API ──
@@ -1429,10 +1612,11 @@ func (h *Handler) CreateBridgeProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var id uuid.UUID
+	// P0-4: 新建桥接配置默认 enabled=false，需经 ENABLE_BRIDGE_PROFILE 审批后启用
 	err = h.pool.QueryRow(ctx,
 		`INSERT INTO bridge_profile (tenant_id, name, source_asset, target_asset, buffer_percent, max_slippage_bps,
 		 batching_policy, execution_policy, withdrawal_policy, enabled)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true) RETURNING id`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false) RETURNING id`,
 		tenantUUID, req.Name, req.SourceAsset, req.TargetAsset, req.BufferPercent, req.MaxSlippageBps,
 		req.BatchingPolicy, req.ExecutionPolicy, req.WithdrawalPolicy,
 	).Scan(&id)
@@ -1465,19 +1649,26 @@ func (h *Handler) UpdateBridgeProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ADM-002: 桥接配置更新为高风险写，收敛到 Maker-Checker 审批
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx,
-		`UPDATE bridge_profile SET name = $1, buffer_percent = $2, max_slippage_bps = $3,
-		 batching_policy = $4, execution_policy = $5, withdrawal_policy = $6, updated_at = now() WHERE id = $7`,
-		req.Name, req.BufferPercent, req.MaxSlippageBps,
-		req.BatchingPolicy, req.ExecutionPolicy, req.WithdrawalPolicy, id,
-	)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionUpdateBridgeProfile, TargetTypeBridgeProfile, &idStr,
+		map[string]interface{}{
+			"profile_id":        idStr,
+			"name":              req.Name,
+			"buffer_percent":    req.BufferPercent,
+			"max_slippage_bps":  req.MaxSlippageBps,
+			"batching_policy":   req.BatchingPolicy,
+			"execution_policy":  req.ExecutionPolicy,
+			"withdrawal_policy": req.WithdrawalPolicy,
+		},
+		"")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "updated"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) EnableBridgeProfile(w http.ResponseWriter, r *http.Request) {
@@ -1489,13 +1680,17 @@ func (h *Handler) EnableBridgeProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE bridge_profile SET enabled = true, updated_at = now() WHERE id = $1`, id)
+	// P0-4: 启用桥接配置走 Maker-Checker 审批，不直接修改业务表
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionEnableBridgeProfile, TargetTypeBridgeProfile, &idStr,
+		map[string]interface{}{"profile_id": idStr},
+		"enable bridge profile")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "ACTIVE"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) DisableBridgeProfile(w http.ResponseWriter, r *http.Request) {
@@ -1507,13 +1702,16 @@ func (h *Handler) DisableBridgeProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE bridge_profile SET enabled = false, updated_at = now() WHERE id = $1`, id)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionDisableBridgeProfile, TargetTypeBridgeProfile, &idStr,
+		map[string]interface{}{"profile_id": idStr},
+		"disable bridge profile")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "DISABLED"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 // ── Wallet Policy API ──
@@ -1579,9 +1777,10 @@ func (h *Handler) CreateWalletPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var id uuid.UUID
+	// P0-4: 新建钱包策略默认 DISABLED，需经 ENABLE_WALLET_POLICY 审批后启用
 	err = h.pool.QueryRow(ctx,
 		`INSERT INTO transit_wallet_policy (tenant_id, policy_code, asset_id, network, address, destination_type, label, max_single_withdrawal, daily_limit, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE') RETURNING id`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'DISABLED') RETURNING id`,
 		tenantUUID, req.PolicyCode, assetID, req.Network, req.Address, req.DestinationType, req.Label, req.MaxSingleWithdrawal, req.DailyLimit,
 	).Scan(&id)
 	if err != nil {
@@ -1609,17 +1808,22 @@ func (h *Handler) UpdateWalletPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ADM-002: 钱包策略限额更新为高风险写，收敛到 Maker-Checker 审批
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx,
-		`UPDATE transit_wallet_policy SET max_single_withdrawal = $1, daily_limit = $2, updated_at = now() WHERE id = $3`,
-		req.MaxSingleWithdrawal, req.DailyLimit, id,
-	)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionUpdateWalletPolicy, TargetTypeWalletPolicy, &idStr,
+		map[string]interface{}{
+			"policy_id":             idStr,
+			"max_single_withdrawal": req.MaxSingleWithdrawal,
+			"daily_limit":           req.DailyLimit,
+		},
+		"")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "updated"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) EnableWalletPolicy(w http.ResponseWriter, r *http.Request) {
@@ -1631,13 +1835,17 @@ func (h *Handler) EnableWalletPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE transit_wallet_policy SET status = 'ACTIVE', updated_at = now() WHERE id = $1`, id)
+	// P0-4: 启用钱包策略走 Maker-Checker 审批，不直接修改业务表
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionEnableWalletPolicy, TargetTypeWalletPolicy, &idStr,
+		map[string]interface{}{"policy_id": idStr},
+		"enable wallet policy")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "ACTIVE"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 func (h *Handler) DisableWalletPolicy(w http.ResponseWriter, r *http.Request) {
@@ -1649,13 +1857,16 @@ func (h *Handler) DisableWalletPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, err = h.pool.Exec(ctx, `UPDATE transit_wallet_policy SET status = 'DISABLED', updated_at = now() WHERE id = $1`, id)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionDisableWalletPolicy, TargetTypeWalletPolicy, &idStr,
+		map[string]interface{}{"policy_id": idStr},
+		"disable wallet policy")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "DISABLED"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 // ── V3 合规升级 API ──
@@ -1746,31 +1957,33 @@ func (h *Handler) UpdateChannelRiskConfig(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
-	// 写入审计日志
-	if req.RiskOverrideEnabled {
-		_, err = h.pool.Exec(ctx,
-			`INSERT INTO admin_override_audit_log (entity_type, entity_id, override_type, reason, operator, expires_at)
-			 VALUES ('adapter_channel', $1, 'RISK_OVERRIDE', $2, $3, $4)`,
-			id, *req.RiskOverrideReason, *req.RiskOverrideOperator, *req.RiskOverrideExpiresAt)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
+	// P0-9: 不直接修改 adapter_channel，创建 PENDING 审批
+	payload := map[string]interface{}{
+		"channel_id":               idStr,
+		"strategy_mode":            req.StrategyMode,
+		"chargeback_threshold_bps": req.ChargebackThresholdBps,
+		"risk_override_enabled":    req.RiskOverrideEnabled,
+	}
+	if req.RiskOverrideReason != nil {
+		payload["risk_override_reason"] = *req.RiskOverrideReason
+	}
+	if req.RiskOverrideOperator != nil {
+		payload["risk_override_operator"] = *req.RiskOverrideOperator
+	}
+	if req.RiskOverrideExpiresAt != nil {
+		payload["risk_override_expires_at"] = *req.RiskOverrideExpiresAt
 	}
 
-	_, err = h.pool.Exec(ctx,
-		`UPDATE adapter_channel SET strategy_mode = $1, chargeback_threshold_bps = $2,
-		 risk_override_enabled = $3, risk_override_reason = $4, risk_override_operator = $5,
-		 risk_override_expires_at = $6, updated_at = now() WHERE id = $7`,
-		req.StrategyMode, req.ChargebackThresholdBps,
-		req.RiskOverrideEnabled, req.RiskOverrideReason, req.RiskOverrideOperator,
-		req.RiskOverrideExpiresAt, id)
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionUpdateChannelRisk, TargetTypeChannelRisk, &idStr,
+		payload,
+		"update channel risk config")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "updated"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 // ListMerchantRiskProfiles 商户风险配置列表
@@ -1841,9 +2054,9 @@ func (h *Handler) ListRollingReserveEntries(w http.ResponseWriter, r *http.Reque
 	ctx := r.Context()
 	merchantID := r.URL.Query().Get("merchant_id")
 	status := r.URL.Query().Get("status")
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 
-	query := `SELECT id::text, merchant_id::text, transaction_id::text, amount_minor, reserve_type, release_date::text, status, created_at::text
+	query := `SELECT id::text, merchant_id::text, transaction_id::text, amount::text, reserve_type, release_date::text, status, created_at::text
 		FROM rolling_reserve_ledger`
 	args := []interface{}{}
 	argIdx := 1
@@ -1875,10 +2088,13 @@ func (h *Handler) ListRollingReserveEntries(w http.ResponseWriter, r *http.Reque
 	var items []map[string]interface{}
 	for rows.Next() {
 		var id, merchantIDVal, txnID, amount, reserveType, releaseDate, statusVal, created string
-		rows.Scan(&id, &merchantIDVal, &txnID, &amount, &reserveType, &releaseDate, &statusVal, &created)
+		if err := rows.Scan(&id, &merchantIDVal, &txnID, &amount, &reserveType, &releaseDate, &statusVal, &created); err != nil {
+			writeErr(w, err)
+			return
+		}
 		items = append(items, map[string]interface{}{
 			"id": id, "merchant_id": merchantIDVal, "transaction_id": txnID,
-			"amount_minor": amount, "reserve_type": reserveType,
+			"amount": amount, "reserve_type": reserveType,
 			"release_date": releaseDate, "status": statusVal, "created_at": created,
 		})
 	}
@@ -1890,9 +2106,9 @@ func (h *Handler) ListFeeAllocations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	transactionID := r.URL.Query().Get("transaction_id")
 	feeType := r.URL.Query().Get("fee_type")
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 
-	query := `SELECT id::text, transaction_id::text, fee_type, amount_minor, currency, allocation_source, status, created_at::text
+	query := `SELECT id::text, transaction_id::text, merchant_id::text, fee_type, amount::text, currency, source_data_hash, status, created_at::text
 		FROM settlement_fee_allocation`
 	args := []interface{}{}
 	argIdx := 1
@@ -1923,12 +2139,15 @@ func (h *Handler) ListFeeAllocations(w http.ResponseWriter, r *http.Request) {
 
 	var items []map[string]interface{}
 	for rows.Next() {
-		var id, txnID, feeTypeVal, amount, currency, source, statusVal, created string
-		rows.Scan(&id, &txnID, &feeTypeVal, &amount, &currency, &source, &statusVal, &created)
+		var id, txnID, merchantIDVal, feeTypeVal, amount, currency, source, statusVal, created string
+		if err := rows.Scan(&id, &txnID, &merchantIDVal, &feeTypeVal, &amount, &currency, &source, &statusVal, &created); err != nil {
+			writeErr(w, err)
+			return
+		}
 		items = append(items, map[string]interface{}{
 			"id": id, "transaction_id": txnID, "fee_type": feeTypeVal,
-			"amount_minor": amount, "currency": currency,
-			"allocation_source": source, "status": statusVal, "created_at": created,
+			"merchant_id": merchantIDVal, "amount": amount, "currency": currency,
+			"source_data_hash": source, "status": statusVal, "created_at": created,
 		})
 	}
 	writeJSON(w, map[string]interface{}{"items": items, "total": len(items)})
@@ -2025,25 +2244,17 @@ func (h *Handler) FreezeIsolationGroup(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// 写入审计日志
-	_, err = h.pool.Exec(ctx,
-		`INSERT INTO admin_override_audit_log (entity_type, entity_id, override_type, reason, operator)
-		 VALUES ('pipeline_isolation_group', $1, 'FREEZE', $2, $3)`,
-		id, req.Reason, req.Operator)
+	// P0-9: 不直接修改 pipeline_isolation_groups，创建 PENDING 审批
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionFreezeIsolationGroup, TargetTypeIsolationGroup, &idStr,
+		map[string]interface{}{"group_id": idStr, "reason": req.Reason, "operator": req.Operator},
+		req.Reason)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	_, err = h.pool.Exec(ctx,
-		`UPDATE pipeline_isolation_groups SET status = 'FROZEN', frozen_reason = $1, frozen_by = $2, frozen_at = now(), updated_at = now() WHERE id = $3`,
-		req.Reason, req.Operator, id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "FROZEN"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 // UnfreezeIsolationGroup 解冻管道隔离组
@@ -2076,25 +2287,17 @@ func (h *Handler) UnfreezeIsolationGroup(w http.ResponseWriter, r *http.Request)
 
 	ctx := r.Context()
 
-	// 写入审计日志
-	_, err = h.pool.Exec(ctx,
-		`INSERT INTO admin_override_audit_log (entity_type, entity_id, override_type, reason, operator)
-		 VALUES ('pipeline_isolation_group', $1, 'UNFREEZE', $2, $3)`,
-		id, req.Reason, req.Operator)
+	// P0-9: 不直接修改 pipeline_isolation_groups，创建 PENDING 审批
+	approvalID, err := h.createPendingApproval(ctx,
+		ActionUnfreezeIsolationGroup, TargetTypeIsolationGroup, &idStr,
+		map[string]interface{}{"group_id": idStr, "reason": req.Reason, "operator": req.Operator},
+		req.Reason)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	_, err = h.pool.Exec(ctx,
-		`UPDATE pipeline_isolation_groups SET status = 'ACTIVE', frozen_reason = NULL, frozen_by = NULL, frozen_at = NULL, updated_at = now() WHERE id = $1`,
-		id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-
-	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "ACTIVE"})
+	writeJSON(w, map[string]interface{}{"id": id.String(), "status": "pending_approval", "approval_id": approvalID})
 }
 
 // GenerateRFIDocument 生成 RFI 文档
@@ -2121,9 +2324,10 @@ func (h *Handler) GenerateRFIDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ADM-011: 锚定真实 checkout 事实——checkout_orders 是订单的权威表
 	var merchantID uuid.UUID
 	err = h.pool.QueryRow(ctx,
-		`SELECT merchant_id FROM transaction WHERE id = $1`,
+		`SELECT merchant_id FROM checkout_orders WHERE id = $1`,
 		orderUUID,
 	).Scan(&merchantID)
 	if err != nil {
@@ -2131,12 +2335,12 @@ func (h *Handler) GenerateRFIDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 检查订单源数据是否存在（发票/物流信息）
-	var sourceExists bool
+	// ADM-011: 源数据检查基于真实订单字段——订单缺失客户信息时需向商户征集
+	var customerPresent bool
 	err = h.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM order_source_data WHERE order_id = $1 AND data_type = $2)`,
-		orderUUID, req.DocumentType,
-	).Scan(&sourceExists)
+		`SELECT customer IS NOT NULL FROM checkout_orders WHERE id = $1`,
+		orderUUID,
+	).Scan(&customerPresent)
 	if err != nil && err != pgx.ErrNoRows {
 		// 查询错误不影响主流程，只记录日志
 		fmt.Printf("warning: check source data failed: %v\n", err)
@@ -2144,7 +2348,7 @@ func (h *Handler) GenerateRFIDocument(w http.ResponseWriter, r *http.Request) {
 
 	// 源数据缺失时标记 REVIEW_REQUIRED
 	status := "PENDING"
-	if !sourceExists {
+	if !customerPresent {
 		status = "REVIEW_REQUIRED"
 	}
 
@@ -2152,9 +2356,9 @@ func (h *Handler) GenerateRFIDocument(w http.ResponseWriter, r *http.Request) {
 
 	var id uuid.UUID
 	err = h.pool.QueryRow(ctx,
-		`INSERT INTO compliance_rfi_documents (order_id, merchant_id, document_type, source_data_hash, status, pdf_content, created_at, updated_at)
+		`INSERT INTO compliance_rfi_documents (order_id, merchant_id, document_type, source_data_hash, status, document_payload, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW()) RETURNING id`,
-		orderUUID, merchantID, req.DocumentType, sourceHash, status, generatePDFContent(req.OrderID, req.DocumentType),
+		orderUUID, merchantID, req.DocumentType, sourceHash, status, generateDocumentPayload(req.OrderID, req.DocumentType),
 	).Scan(&id)
 	if err != nil {
 		writeErr(w, err)
@@ -2182,7 +2386,7 @@ func (h *Handler) GetRFIDocument(w http.ResponseWriter, r *http.Request) {
 	)
 	err = h.pool.QueryRow(ctx,
 		`SELECT id::text, order_id::text, merchant_id::text, document_type, source_data_hash, status,
-		 pdf_content, approved_by, approved_at::text, rejected_by, rejected_at::text, rejected_reason,
+		 document_payload, approved_by, approved_at::text, rejected_by, rejected_at::text, rejected_reason,
 		 created_at::text, updated_at::text
 		 FROM compliance_rfi_documents WHERE id = $1`,
 		id,
@@ -2200,7 +2404,7 @@ func (h *Handler) GetRFIDocument(w http.ResponseWriter, r *http.Request) {
 		"created_at": created, "updated_at": updated,
 	}
 	if pdfContent != nil {
-		result["pdf_content_base64"] = base64.StdEncoding.EncodeToString(pdfContent)
+		result["document_payload_base64"] = base64.StdEncoding.EncodeToString(pdfContent)
 	}
 	if approvedBy != nil {
 		result["approved_by"] = *approvedBy
@@ -2232,16 +2436,10 @@ func (h *Handler) ApproveRFIDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Operator string `json:"operator"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, err)
-		return
-	}
-
-	if req.Operator == "" {
-		writeErr(w, errors.New("operator is required"))
+	// ADM-013: actor 只取认证 Context，拒绝 body 中伪造的 operator
+	operator := httpx.ResolveOperator(ctx)
+	if operator == "" || operator == "unknown" {
+		writeErr(w, apperr.ErrForbidden.WithMessage("operator identity not found in authenticated context"))
 		return
 	}
 
@@ -2254,7 +2452,7 @@ func (h *Handler) ApproveRFIDocument(w http.ResponseWriter, r *http.Request) {
 
 	_, err = tx.Exec(ctx,
 		`UPDATE compliance_rfi_documents SET status = 'APPROVED', approved_by = $1, approved_at = NOW(), updated_at = NOW() WHERE id = $2`,
-		req.Operator, id)
+		operator, id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -2263,7 +2461,7 @@ func (h *Handler) ApproveRFIDocument(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec(ctx,
 		`INSERT INTO admin_override_audit_log (entity_type, entity_id, override_type, reason, operator, created_at)
 		 VALUES ('compliance_rfi_documents', $1, 'APPROVE', 'Document approved', $2, NOW())`,
-		id, req.Operator)
+		id, operator)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -2289,16 +2487,21 @@ func (h *Handler) RejectRFIDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Operator string `json:"operator"`
-		Reason   string `json:"reason"`
+		Reason string `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	if req.Operator == "" || req.Reason == "" {
-		writeErr(w, errors.New("operator and reason are required"))
+	// ADM-013: actor 只取认证 Context，拒绝 body 中伪造的 operator
+	operator := httpx.ResolveOperator(ctx)
+	if operator == "" || operator == "unknown" {
+		writeErr(w, apperr.ErrForbidden.WithMessage("operator identity not found in authenticated context"))
+		return
+	}
+	if req.Reason == "" {
+		writeErr(w, errors.New("reason is required"))
 		return
 	}
 
@@ -2311,7 +2514,7 @@ func (h *Handler) RejectRFIDocument(w http.ResponseWriter, r *http.Request) {
 
 	_, err = tx.Exec(ctx,
 		`UPDATE compliance_rfi_documents SET status = 'REJECTED', rejected_by = $1, rejected_at = NOW(), rejected_reason = $2, updated_at = NOW() WHERE id = $3`,
-		req.Operator, req.Reason, id)
+		operator, req.Reason, id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -2320,7 +2523,7 @@ func (h *Handler) RejectRFIDocument(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec(ctx,
 		`INSERT INTO admin_override_audit_log (entity_type, entity_id, override_type, reason, operator, created_at)
 		 VALUES ('compliance_rfi_documents', $1, 'REJECT', $2, $3, NOW())`,
-		id, req.Reason, req.Operator)
+		id, req.Reason, operator)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -2340,8 +2543,8 @@ func generateSourceHash(orderID, docType string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(data)))
 }
 
-// generatePDFContent 生成 PDF 内容
-func generatePDFContent(orderID, docType string) []byte {
+// generateDocumentPayload 生成 PDF 内容
+func generateDocumentPayload(orderID, docType string) []byte {
 	metadata := fmt.Sprintf(`{"order_id":"%s","document_type":"%s","source_data_hash":"%s","generated_at":"%s"}`,
 		orderID, docType, generateSourceHash(orderID, docType), time.Now().UTC().Format(time.RFC3339))
 	return []byte(metadata)
@@ -2353,9 +2556,9 @@ func (h *Handler) ListRFIDocuments(w http.ResponseWriter, r *http.Request) {
 	orderID := r.URL.Query().Get("order_id")
 	merchantID := r.URL.Query().Get("merchant_id")
 	status := r.URL.Query().Get("status")
-	limit := queryInt(r, "limit", 50)
+	limit := queryLimit(r, 50)
 
-	query := `SELECT id::text, order_id::text, merchant_id::text, document_type, source_data_hash, status, review_required_reason, created_at::text, updated_at::text
+	query := `SELECT id::text, order_id::text, merchant_id::text, document_type, source_data_hash, status, metadata->>'review_required_reason', created_at::text, updated_at::text
 		FROM compliance_rfi_documents`
 	args := []interface{}{}
 	argIdx := 1
@@ -2397,7 +2600,10 @@ func (h *Handler) ListRFIDocuments(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, orderIDVal, merchantIDVal, docType, sourceHash, statusVal, created, updated string
 		var reviewReason *string
-		rows.Scan(&id, &orderIDVal, &merchantIDVal, &docType, &sourceHash, &statusVal, &reviewReason, &created, &updated)
+		if err := rows.Scan(&id, &orderIDVal, &merchantIDVal, &docType, &sourceHash, &statusVal, &reviewReason, &created, &updated); err != nil {
+			writeErr(w, err)
+			return
+		}
 
 		item := map[string]interface{}{
 			"id": id, "order_id": orderIDVal, "merchant_id": merchantIDVal,
@@ -2416,7 +2622,7 @@ func (h *Handler) ListRFIDocuments(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListOverrideAuditLogs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	entityType := r.URL.Query().Get("entity_type")
-	limit := queryInt(r, "limit", 100)
+	limit := queryLimit(r, 100)
 
 	query := `SELECT id::text, entity_type, entity_id::text, override_type, reason, operator, expires_at::text, created_at::text
 		FROM admin_override_audit_log`
@@ -2448,6 +2654,7 @@ func (h *Handler) ListOverrideAuditLogs(w http.ResponseWriter, r *http.Request) 
 			"id": id, "entity_type": entityTypeVal, "entity_id": entityID,
 			"override_type": overrideType, "reason": reason, "operator": operator,
 			"created_at": created,
+			"human_text": PresentOverrideAuditLogHumanText(overrideType, operator, reason),
 		}
 		if expiresAt != nil {
 			item["expires_at"] = *expiresAt

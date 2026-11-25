@@ -58,12 +58,24 @@ func (m *mockIssuingAdapterFactory) Register(providerCode string, factory func(c
 	m.Called(providerCode, factory)
 }
 
+func (m *mockIssuingAdapterFactory) Has(providerCode string) bool {
+	return m.Called(providerCode).Bool(0)
+}
+
+func (m *mockIssuingAdapterFactory) Validate() error {
+	return m.Called().Error(0)
+}
+
+func (m *mockIssuingAdapterFactory) RegisteredCodes() []string {
+	return m.Called().Get(0).([]string)
+}
+
 type mockVaultService struct {
 	mock.Mock
 }
 
-func (m *mockVaultService) Decrypt(ctx context.Context, vaultKey string) (map[string]string, error) {
-	args := m.Called(ctx, vaultKey)
+func (m *mockVaultService) Decrypt(ctx context.Context, req VaultCredentialRequest) (map[string]string, error) {
+	args := m.Called(ctx, req)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
@@ -205,8 +217,8 @@ func TestCreateCardSuccess(t *testing.T) {
 	_ = registry.RegisterProvider(provider)
 
 	mockFactory.On("Create", ctx, "test-provider", credential).Return(mockAdapter, nil)
-	mockVault.On("Decrypt", ctx, vaultKey).Return(credential, nil)
-	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, errors.New("not found"))
+	mockVault.On("Decrypt", ctx, mock.Anything).Return(credential, nil)
+	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, ErrCardNotFound)
 	mockFG.On("CheckMerchantIssuingAllowed", ctx, merchantID).Return(nil)
 	mockFG.On("CheckMerchantFraudRate", ctx, merchantID).Return(nil)
 
@@ -229,6 +241,7 @@ func TestCreateCardSuccess(t *testing.T) {
 		PoolCode:           "pool-1",
 		Currency:           "USD",
 		SpendingLimitMinor: 100000,
+		IdempotencyKey:     "idem-key-success",
 		CreatedBy:          "admin",
 	}
 
@@ -269,7 +282,7 @@ func TestCreateCard_ProviderNotActive(t *testing.T) {
 	mockCardRepo := new(mockCardRepository)
 	mockFG := new(mockFraudGuard)
 
-	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, errors.New("not found"))
+	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, ErrCardNotFound)
 	mockFG.On("CheckMerchantIssuingAllowed", ctx, merchantID).Return(nil)
 	mockFG.On("CheckMerchantFraudRate", ctx, merchantID).Return(nil)
 
@@ -281,6 +294,7 @@ func TestCreateCard_ProviderNotActive(t *testing.T) {
 		PoolCode:           "pool-1",
 		Currency:           "USD",
 		SpendingLimitMinor: 100000,
+		IdempotencyKey:     "idem-key-test",
 		CreatedBy:          "admin",
 	}
 
@@ -314,7 +328,7 @@ func TestCreateCard_CredentialVaultKeyEmpty(t *testing.T) {
 	mockCardRepo := new(mockCardRepository)
 	mockFG := new(mockFraudGuard)
 
-	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, errors.New("not found"))
+	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, ErrCardNotFound)
 	mockFG.On("CheckMerchantIssuingAllowed", ctx, merchantID).Return(nil)
 	mockFG.On("CheckMerchantFraudRate", ctx, merchantID).Return(nil)
 
@@ -326,6 +340,7 @@ func TestCreateCard_CredentialVaultKeyEmpty(t *testing.T) {
 		PoolCode:           "pool-1",
 		Currency:           "USD",
 		SpendingLimitMinor: 100000,
+		IdempotencyKey:     "idem-key-test",
 		CreatedBy:          "admin",
 	}
 
@@ -360,10 +375,10 @@ func TestCreateCard_CredentialDecryptFailed(t *testing.T) {
 	mockCardRepo := new(mockCardRepository)
 	mockFG := new(mockFraudGuard)
 
-	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, errors.New("not found"))
+	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, ErrCardNotFound)
 	mockFG.On("CheckMerchantIssuingAllowed", ctx, merchantID).Return(nil)
 	mockFG.On("CheckMerchantFraudRate", ctx, merchantID).Return(nil)
-	mockVault.On("Decrypt", ctx, vaultKey).Return(nil, errors.New("decrypt failed"))
+	mockVault.On("Decrypt", ctx, mock.Anything).Return(nil, errors.New("decrypt failed"))
 
 	service := NewService(registry, mockFactory, mockFG, mockVault, mockCardRepo, mockProviderRepo)
 
@@ -373,6 +388,7 @@ func TestCreateCard_CredentialDecryptFailed(t *testing.T) {
 		PoolCode:           "pool-1",
 		Currency:           "USD",
 		SpendingLimitMinor: 100000,
+		IdempotencyKey:     "idem-key-test",
 		CreatedBy:          "admin",
 	}
 
@@ -406,7 +422,7 @@ func TestCreateCard_MerchantNotAllowed(t *testing.T) {
 	mockCardRepo := new(mockCardRepository)
 	mockFG := new(mockFraudGuard)
 
-	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, errors.New("not found"))
+	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, ErrCardNotFound)
 	mockFG.On("CheckMerchantIssuingAllowed", ctx, merchantID).Return(ErrMerchantIssuingNotAllowed)
 
 	service := NewService(registry, mockFactory, mockFG, mockVault, mockCardRepo, mockProviderRepo)
@@ -417,6 +433,7 @@ func TestCreateCard_MerchantNotAllowed(t *testing.T) {
 		PoolCode:           "pool-1",
 		Currency:           "USD",
 		SpendingLimitMinor: 100000,
+		IdempotencyKey:     "idem-key-test",
 		CreatedBy:          "admin",
 	}
 
@@ -450,7 +467,7 @@ func TestCreateCard_MerchantFraudRateExceeded(t *testing.T) {
 	mockCardRepo := new(mockCardRepository)
 	mockFG := new(mockFraudGuard)
 
-	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, errors.New("not found"))
+	mockCardRepo.On("GetByIdempotencyKey", ctx, merchantID, mock.Anything).Return(nil, ErrCardNotFound)
 	mockFG.On("CheckMerchantIssuingAllowed", ctx, merchantID).Return(nil)
 	mockFG.On("CheckMerchantFraudRate", ctx, merchantID).Return(ErrMerchantFraudRateExceeded)
 
@@ -462,6 +479,7 @@ func TestCreateCard_MerchantFraudRateExceeded(t *testing.T) {
 		PoolCode:           "pool-1",
 		Currency:           "USD",
 		SpendingLimitMinor: 100000,
+		IdempotencyKey:     "idem-key-test",
 		CreatedBy:          "admin",
 	}
 
@@ -532,7 +550,7 @@ func TestProcessAuthWebhook_DeclineThresholdExceeded(t *testing.T) {
 	_ = registry.RegisterProvider(provider)
 
 	mockFactory.On("Create", ctx, "test-provider", credential).Return(mockAdapter, nil)
-	mockVault.On("Decrypt", ctx, vaultKey).Return(credential, nil)
+	mockVault.On("Decrypt", ctx, mock.Anything).Return(credential, nil)
 
 	event := &CardAuthEvent{
 		EventID:    "evt-123",

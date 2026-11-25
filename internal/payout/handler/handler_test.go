@@ -16,9 +16,7 @@ func setupRouter(h *Handler) *chi.Mux {
 	r.Post("/merchant/payout-address", h.CreateAddress)
 	r.Post("/merchant/payout-request", h.CreatePayoutRequest)
 	r.Post("/internal/payout/{id}/freeze", h.Freeze)
-	r.Post("/internal/payout/{id}/fx-lock", h.FxLock)
-	r.Post("/internal/payout/{id}/submit", h.Submit)
-	r.Post("/internal/payout/{id}/reconcile", h.Reconcile)
+	// SEC-012: 假成功端点 fx-lock/submit/reconcile 已删除，不再注册。
 	return r
 }
 
@@ -71,35 +69,8 @@ func TestFreeze_NilService(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-func TestFxLock_NilService(t *testing.T) {
-	h := New(nil)
-	r := setupRouter(h)
-	id := uuid.New()
-	req := httptest.NewRequest("POST", "/internal/payout/"+id.String()+"/fx-lock", nil)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-}
-
-func TestSubmit_NilService(t *testing.T) {
-	h := New(nil)
-	r := setupRouter(h)
-	id := uuid.New()
-	req := httptest.NewRequest("POST", "/internal/payout/"+id.String()+"/submit", nil)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-}
-
-func TestReconcile_NilService(t *testing.T) {
-	h := New(nil)
-	r := setupRouter(h)
-	id := uuid.New()
-	req := httptest.NewRequest("POST", "/internal/payout/"+id.String()+"/reconcile", nil)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-}
+// SEC-012: TestFxLock_NilService / TestSubmit_NilService / TestReconcile_NilService
+// 已随假成功端点一并删除。
 
 func TestFreeze_InvalidBody(t *testing.T) {
 	h := New(nil)

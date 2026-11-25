@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,6 +108,63 @@ func NewNxtapayCardAcquirer(apiKey string, apiSecret string, webhookSecret strin
 		acquirerClient:  nxtapayClient,
 		webhookSecret:   webhookSecret,
 		supportedAssets: []string{"USD", "EUR", "GBP"},
+		config:          config,
+	}, nil
+}
+
+// NewHyperswitchCardAcquirer 创建 Hyperswitch 编排层适配器
+//
+// Hyperswitch 作为聚合编排层，底层 PSP 由 Hyperswitch 路由；
+// 对本系统只暴露统一的 Authorize / Capture / Refund / VerifyWebhook。
+//
+// 凭证优先级：vault（channelConfig / credentials）> 环境变量，环境变量用于本地与自建部署：
+// HYPERSWITCH_API_KEY / HYPERSWITCH_WEBHOOK_SECRET / HYPERSWITCH_BASE_URL / HYPERSWITCH_PROFILE_ID
+func NewHyperswitchCardAcquirer(apiKey string, webhookSecret string, config map[string]any) (domain.AdapterClient, error) {
+	if apiKey == "" {
+		apiKey = os.Getenv("HYPERSWITCH_API_KEY")
+	}
+	if webhookSecret == "" {
+		webhookSecret = os.Getenv("HYPERSWITCH_WEBHOOK_SECRET")
+	}
+	if apiKey == "" {
+		return nil, domain.ErrCredentialMissing
+	}
+
+	timeout := 30 * time.Second
+	if t, ok := config["timeout"].(time.Duration); ok {
+		timeout = t
+	}
+	baseURL := ""
+	if u, ok := config["base_url"].(string); ok {
+		baseURL = u
+	}
+	if baseURL == "" {
+		baseURL = os.Getenv("HYPERSWITCH_BASE_URL")
+	}
+	profileID := ""
+	if p, ok := config["profile_id"].(string); ok {
+		profileID = p
+	}
+	if profileID == "" {
+		profileID = os.Getenv("HYPERSWITCH_PROFILE_ID")
+	}
+
+	client, err := adapter.NewHyperswitchClient(adapter.HyperswitchConfig{
+		APIKey:        apiKey,
+		WebhookSecret: webhookSecret,
+		BaseURL:       baseURL,
+		ProfileID:     profileID,
+		Timeout:       timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &CardAcquirerAdapter{
+		providerCode:    "hyperswitch",
+		acquirerClient:  adapter.NewHyperswitchAcquirer(client),
+		webhookSecret:   webhookSecret,
+		supportedAssets: []string{"USD", "EUR", "GBP", "CNY", "HKD", "SGD", "JPY", "AUD", "CAD"},
 		config:          config,
 	}, nil
 }

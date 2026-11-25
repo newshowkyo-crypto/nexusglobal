@@ -1,0 +1,3 @@
+-- 000045_acquirer_channel_runtime_binding.down.sql
+DROP INDEX IF EXISTS idx_tenant_acquirer_channel_acquirer_channel_id;
+ALTER TABLE tenant_acquirer_channel DROP COLUMN IF EXISTS acquirer_channel_id;

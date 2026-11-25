@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -23,6 +25,12 @@ func setupTestRedis(t *testing.T) (*redis.Client, func()) {
 	}
 
 	ctx := context.Background()
+	// OPS-007: 外部共享 Redis 优先（TEST_REDIS_ADDR），testcontainers 兜底。
+	if addr := os.Getenv("TEST_REDIS_ADDR"); addr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: addr})
+		require.NoError(t, rdb.Ping(ctx).Err(), "ping external TEST_REDIS_ADDR")
+		return rdb, func() { _ = rdb.Close() }
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "redis:7-alpine",
@@ -105,6 +113,15 @@ func (m *mockRepository) ListAllActiveTenantAcquirerChannels(ctx context.Context
 	return args.Get(0).([]domain.TenantAcquirerChannel), args.Error(1)
 }
 
+// P0-B2: 新增方法 — mock 实现
+func (m *mockRepository) ListActiveChannelsByMerchantAndCurrency(ctx context.Context, merchantID uuid.UUID, currency string) ([]domain.TenantAcquirerChannel, error) {
+	args := m.Called(ctx, merchantID, currency)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]domain.TenantAcquirerChannel), args.Error(1)
+}
+
 func (m *mockRepository) CreateTenantAcquirerChannel(ctx context.Context, channel *domain.TenantAcquirerChannel) error {
 	args := m.Called(ctx, channel)
 	return args.Error(0)
@@ -165,6 +182,16 @@ func (m *mockRepository) GetAcquirerChannelByID(ctx context.Context, id uuid.UUI
 		return nil, args.Error(1)
 	}
 	return args.Get(0).(*domain.AcquirerChannel), args.Error(1)
+}
+
+func (m *mockRepository) GetMerchantRoutingPolicy(ctx context.Context, merchantID uuid.UUID) (*domain.MerchantRoutingPolicy, error) {
+	// 必须走 m.Called：各用例通过 On(...) 决定 tier / 状态，硬编码默认值会让
+	// tier 不匹配、policy 非 ACTIVE 这两类 fail-closed 用例失去意义。
+	args := m.Called(ctx, merchantID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*domain.MerchantRoutingPolicy), args.Error(1)
 }
 
 // 注意：此测试需要数据库环境。在 -short 模式下会跳过。
@@ -468,11 +495,12 @@ func TestPubSub_ValidPayload_PublishAndReceive(t *testing.T) {
 
 	// 设置 mock 返回值
 	mockRepo.On("GetTenantAcquirerChannelByID", mock.Anything, channelID).Return(&domain.TenantAcquirerChannel{
-		ID:          channelID,
-		ProviderID:  providerID,
-		IsActive:    true,
-		Version:     newVersion,
-		ChannelCode: "test-channel",
+		ID:           channelID,
+		ProviderID:   providerID,
+		IsActive:     true,
+		Version:      newVersion,
+		ChannelCode:  "test-channel",
+		ProviderTier: domain.ProviderTierCompliant,
 	}, nil)
 
 	mockRepo.On("GetPaymentProviderByID", mock.Anything, providerID).Return(&domain.PaymentProvider{
@@ -640,11 +668,12 @@ func TestPubSub_ConcurrentVersionEvents(t *testing.T) {
 
 	// 设置 mock 返回值 - 返回最新版本
 	mockRepo.On("GetTenantAcquirerChannelByID", mock.Anything, channelID).Return(&domain.TenantAcquirerChannel{
-		ID:          channelID,
-		ProviderID:  providerID,
-		IsActive:    true,
-		Version:     10,
-		ChannelCode: "test-channel",
+		ID:           channelID,
+		ProviderID:   providerID,
+		IsActive:     true,
+		Version:      10,
+		ChannelCode:  "test-channel",
+		ProviderTier: domain.ProviderTierCompliant,
 	}, nil)
 
 	mockRepo.On("GetPaymentProviderByID", mock.Anything, providerID).Return(&domain.PaymentProvider{
@@ -694,4 +723,345 @@ func TestPubSub_ConcurrentVersionEvents(t *testing.T) {
 	bundle, err := reg.Get(channelID)
 	assert.NoError(t, err)
 	assert.Equal(t, 10, bundle.Version, "highest version should be applied")
+}
+
+// TestSelectChannel_RejectsMerchantTierMismatch 验证 SelectChannel 在商户 policy tier
+// 与通道 tier 不匹配时返回 ErrChannelNotFound（fail-closed）。
+func TestSelectChannel_RejectsMerchantTierMismatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping registry test in short mode")
+	}
+
+	mockRepo := &mockRepository{}
+
+	merchantID := uuid.New()
+	acquirerChannelID := uuid.New()
+	providerID := uuid.New()
+
+	// 商户 policy 是 TIER_1_HIGH_RISK
+	mockRepo.On("GetMerchantRoutingPolicy", mock.Anything, merchantID).Return(&domain.MerchantRoutingPolicy{
+		MerchantID:   merchantID,
+		ProviderTier: domain.ProviderTierHighRisk,
+		Status:       "ACTIVE",
+		Version:      1,
+	}, nil)
+
+	// 但通道是 TIER_2_COMPLIANT（不匹配）
+	mockRepo.On("ListActiveChannelsByMerchantAndCurrency", mock.Anything, merchantID, "USD").Return([]domain.TenantAcquirerChannel{
+		{
+			ID:                uuid.New(),
+			TenantID:          uuid.New(),
+			MerchantID:        merchantID,
+			ChannelCode:       "test-channel",
+			ProviderID:        providerID,
+			IsActive:          true,
+			Version:           1,
+			ProviderTier:      domain.ProviderTierCompliant,
+			AcquirerChannelID: &acquirerChannelID,
+		},
+	}, nil)
+
+	reg := NewChannelRegistry(RegistryConfig{
+		Repo:     mockRepo,
+		FailMode: FailModeClosed,
+	})
+
+	_, err := reg.SelectChannel(context.Background(), merchantID, "USD", 10000)
+	assert.ErrorIs(t, err, domain.ErrChannelNotFound, "tier mismatch should result in ErrChannelNotFound")
+}
+
+// TestSelectChannel_RejectsInactiveControlPlaneChannel 验证 SelectChannel 在商户 policy
+// 状态为 INACTIVE 时返回错误（fail-closed）。
+func TestSelectChannel_RejectsInactiveControlPlaneChannel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping registry test in short mode")
+	}
+
+	mockRepo := &mockRepository{}
+
+	merchantID := uuid.New()
+
+	// 商户 policy 是 INACTIVE
+	mockRepo.On("GetMerchantRoutingPolicy", mock.Anything, merchantID).Return(&domain.MerchantRoutingPolicy{
+		MerchantID:   merchantID,
+		ProviderTier: domain.ProviderTierCompliant,
+		Status:       "INACTIVE",
+		Version:      1,
+	}, nil)
+
+	reg := NewChannelRegistry(RegistryConfig{
+		Repo:     mockRepo,
+		FailMode: FailModeClosed,
+	})
+
+	_, err := reg.SelectChannel(context.Background(), merchantID, "USD", 10000)
+	assert.Error(t, err, "inactive merchant policy should be rejected")
+	assert.Contains(t, err.Error(), "fail-closed")
+}
+
+// TestLoadAll_RealModeRejectsNilFactory 验证 real mode 下 LoadAll 在没有注入 Factory 时返回错误。
+func TestLoadAll_RealModeRejectsNilFactory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping registry test in short mode")
+	}
+
+	mockRepo := &mockRepository{}
+
+	reg := NewChannelRegistry(RegistryConfig{
+		Repo:       mockRepo,
+		FailMode:   FailModeClosed,
+		IsRealMode: true,
+		// Factory 未注入
+	})
+
+	err := reg.LoadAll(context.Background())
+	assert.Error(t, err, "real mode without Factory should fail")
+	assert.Contains(t, err.Error(), "AcquirerAdapterFactory")
+}
+
+// TestLoadAll_RealModeRejectsUnboundActiveRuntimeChannel 验证 real mode 下 LoadAll
+// 在存在未绑定 acquirer_channel_id 的 active runtime channel 时返回错误。
+func TestLoadAll_RealModeRejectsUnboundActiveRuntimeChannel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping registry test in short mode")
+	}
+
+	mockRepo := &mockRepository{}
+
+	// 返回一个 AcquirerChannelID=nil 的 active runtime channel
+	mockRepo.On("ListAllActiveTenantAcquirerChannels", mock.Anything).Return([]domain.TenantAcquirerChannel{
+		{
+			ID:                uuid.New(),
+			TenantID:          uuid.New(),
+			MerchantID:        uuid.New(),
+			ChannelCode:       "unbound-channel",
+			ProviderID:        uuid.New(),
+			IsActive:          true,
+			Version:           1,
+			AcquirerChannelID: nil, // 未绑定
+		},
+	}, nil)
+
+	factory := NewDefaultAdapterFactory(nil)
+
+	reg := NewChannelRegistry(RegistryConfig{
+		Repo:       mockRepo,
+		FailMode:   FailModeClosed,
+		IsRealMode: true,
+		Factory:    factory,
+	})
+
+	err := reg.LoadAll(context.Background())
+	assert.Error(t, err, "real mode with unbound active runtime channel should fail")
+	assert.Contains(t, err.Error(), "acquirer_channel_id binding")
+}
+
+// testMockAdapter 用于纯单测的 AcquirerAdapter 实现
+type testMockAdapter struct{}
+
+func (m *testMockAdapter) Authorize(ctx context.Context, req domain.AuthorizeRequest) (*domain.AuthorizeResult, error) {
+	return &domain.AuthorizeResult{}, nil
+}
+func (m *testMockAdapter) Capture(ctx context.Context, req domain.CaptureRequest) (*domain.CaptureResult, error) {
+	return &domain.CaptureResult{}, nil
+}
+func (m *testMockAdapter) Refund(ctx context.Context, req domain.RefundRequest) (*domain.RefundResult, error) {
+	return &domain.RefundResult{}, nil
+}
+func (m *testMockAdapter) VerifyWebhook(ctx context.Context, req domain.VerifyWebhookRequest) (*domain.VerifiedWebhookEvent, error) {
+	return &domain.VerifiedWebhookEvent{}, nil
+}
+
+// TestLoadAll_RealModeBoundChannel 验证 real mode 下 AcquirerChannelID 非 nil 的通道不返回错误。
+func TestLoadAll_RealModeBoundChannel(t *testing.T) {
+	mockRepo := &mockRepository{}
+
+	acquirerChannelID := uuid.New()
+	providerID := uuid.New()
+	channelID := uuid.New()
+
+	mockRepo.On("ListAllActiveTenantAcquirerChannels", mock.Anything).Return([]domain.TenantAcquirerChannel{
+		{
+			ID:                channelID,
+			TenantID:          uuid.New(),
+			MerchantID:        uuid.New(),
+			ChannelCode:       "bound-channel",
+			ProviderID:        providerID,
+			IsActive:          true,
+			Version:           1,
+			AcquirerChannelID: &acquirerChannelID,
+		},
+	}, nil)
+
+	mockRepo.On("GetPaymentProviderByID", mock.Anything, providerID).Return(&domain.PaymentProvider{
+		ID:           providerID,
+		ProviderCode: "stripe",
+	}, nil)
+
+	mockRepo.On("GetProviderCredential", mock.Anything, providerID, mock.Anything, mock.Anything).Return(nil, nil)
+
+	factory := NewDefaultAdapterFactory(nil)
+	factory.Register("stripe", func(credentials map[domain.CredentialType]string, config map[string]any) (domain.AcquirerAdapter, error) {
+		return &testMockAdapter{}, nil
+	})
+
+	reg := NewChannelRegistry(RegistryConfig{
+		Repo:       mockRepo,
+		FailMode:   FailModeClosed,
+		IsRealMode: true,
+		Factory:    factory,
+	})
+
+	err := reg.LoadAll(context.Background())
+	assert.NoError(t, err, "real mode with bound channel should not fail")
+}
+
+// TestLoadAll_RealModeRejectsUnbound 验证 real mode 下 AcquirerChannelID 为 nil 的通道返回错误。
+func TestLoadAll_RealModeRejectsUnbound(t *testing.T) {
+	mockRepo := &mockRepository{}
+
+	mockRepo.On("ListAllActiveTenantAcquirerChannels", mock.Anything).Return([]domain.TenantAcquirerChannel{
+		{
+			ID:                uuid.New(),
+			TenantID:          uuid.New(),
+			MerchantID:        uuid.New(),
+			ChannelCode:       "unbound-channel",
+			ProviderID:        uuid.New(),
+			IsActive:          true,
+			Version:           1,
+			AcquirerChannelID: nil,
+		},
+	}, nil)
+
+	factory := NewDefaultAdapterFactory(nil)
+
+	reg := NewChannelRegistry(RegistryConfig{
+		Repo:       mockRepo,
+		FailMode:   FailModeClosed,
+		IsRealMode: true,
+		Factory:    factory,
+	})
+
+	err := reg.LoadAll(context.Background())
+	assert.Error(t, err, "real mode with unbound channel should fail")
+	assert.Contains(t, err.Error(), "no acquirer_channel_id binding")
+}
+
+// TestRealModeRejectsMockProvider 验证 real mode 下 createClient 拒绝 mock provider。
+func TestRealModeRejectsMockProvider(t *testing.T) {
+	factory := NewDefaultAdapterFactory(nil)
+	factory.Register("mock", func(credentials map[domain.CredentialType]string, config map[string]any) (domain.AcquirerAdapter, error) {
+		return &testMockAdapter{}, nil
+	})
+
+	reg := NewChannelRegistry(RegistryConfig{
+		FailMode:   FailModeClosed,
+		IsRealMode: true,
+		Factory:    factory,
+	})
+
+	provider := &domain.PaymentProvider{
+		ID:           uuid.New(),
+		ProviderCode: "mock",
+	}
+
+	_, err := reg.createClient(provider, nil, nil)
+	assert.ErrorIs(t, err, domain.ErrProviderCodeUnregistered, "real mode should reject mock provider")
+}
+
+// TestLocalModeAllowsExplicitMockProvider 验证 local mode 下 createClient 允许 mock provider。
+func TestLocalModeAllowsExplicitMockProvider(t *testing.T) {
+	factory := NewDefaultAdapterFactory(nil)
+	factory.Register("mock", func(credentials map[domain.CredentialType]string, config map[string]any) (domain.AcquirerAdapter, error) {
+		return &testMockAdapter{}, nil
+	})
+
+	reg := NewChannelRegistry(RegistryConfig{
+		FailMode:   FailModeClosed,
+		IsRealMode: false,
+		Factory:    factory,
+	})
+
+	provider := &domain.PaymentProvider{
+		ID:           uuid.New(),
+		ProviderCode: "mock",
+	}
+
+	client, err := reg.createClient(provider, nil, nil)
+	assert.NoError(t, err, "local mode should allow mock provider")
+	assert.NotNil(t, client)
+}
+
+// TestRegistry_Get_BurnModeFailsClosed 验证 BURN_MODE 的 bundle 在 Get 方法中被拒绝（fail-closed）。
+// 纯内存测试，不需要容器，不因 testing.Short() 而 Skip。
+func TestRegistry_Get_BurnModeFailsClosed(t *testing.T) {
+	reg := NewChannelRegistry(RegistryConfig{
+		FailMode: FailModeClosed,
+	})
+
+	channelID := uuid.New()
+
+	// 预置 BURN_MODE 状态
+	reg.statusCacheMu.Lock()
+	reg.statusCache[channelID] = ChannelStatus{
+		ChannelID:  channelID,
+		IsActive:   true,
+		IsBurnMode: true,
+		Version:    1,
+	}
+	reg.statusCacheMu.Unlock()
+
+	// 预置活跃 bundle
+	reg.mu.Lock()
+	reg.bundles[channelID] = &domain.ClientBundle{
+		ChannelID: channelID,
+		IsActive:  true,
+		Version:   1,
+	}
+	reg.mu.Unlock()
+
+	bundle, err := reg.Get(channelID)
+	assert.Error(t, err, "BURN_MODE bundle should fail-closed")
+	assert.Contains(t, err.Error(), "BURN_MODE")
+	assert.Nil(t, bundle)
+}
+
+// TestRegistry_SelectChannel_BurnModeFailsClosed 验证 BURN_MODE 的 channel 在 SelectChannel 中被跳过（不可路由），
+// 返回 ErrChannelNotFound。纯内存测试，不需要容器，不因 testing.Short() 而 Skip。
+func TestRegistry_SelectChannel_BurnModeFailsClosed(t *testing.T) {
+	mockRepo := &mockRepository{}
+
+	merchantID := uuid.New()
+	channelID := uuid.New()
+	providerID := uuid.New()
+
+	// 商户 policy 为 ACTIVE COMPLIANT（正常可路由），只有通道本身是 BURN_MODE
+	mockRepo.On("GetMerchantRoutingPolicy", mock.Anything, merchantID).Return(&domain.MerchantRoutingPolicy{
+		MerchantID:   merchantID,
+		ProviderTier: domain.ProviderTierCompliant,
+		Status:       "ACTIVE",
+		Version:      1,
+	}, nil)
+
+	mockRepo.On("ListActiveChannelsByMerchantAndCurrency", mock.Anything, merchantID, "USD").Return([]domain.TenantAcquirerChannel{
+		{
+			ID:            channelID,
+			TenantID:      uuid.New(),
+			MerchantID:    merchantID,
+			ChannelCode:   "burn-channel",
+			ProviderID:    providerID,
+			IsActive:      true,
+			Version:       1,
+			ProviderTier:  domain.ProviderTierCompliant,
+			ChannelConfig: map[string]any{"burn_mode": true},
+		},
+	}, nil)
+
+	reg := NewChannelRegistry(RegistryConfig{
+		Repo:     mockRepo,
+		FailMode: FailModeClosed,
+	})
+
+	_, err := reg.SelectChannel(context.Background(), merchantID, "USD", 100)
+	assert.ErrorIs(t, err, domain.ErrChannelNotFound, "BURN_MODE channel should not be selectable")
 }

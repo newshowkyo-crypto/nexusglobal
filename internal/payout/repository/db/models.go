@@ -68,8 +68,8 @@ type MaeConfiguration struct {
 	Jurisdiction             string             `json:"jurisdiction"`
 	SupportedCurrencies      []byte             `json:"supported_currencies"`
 	ApiBaseUrl               string             `json:"api_base_url"`
-	ApiKeyCiphertext         []byte             `json:"api_key_ciphertext"`
-	WebhookSecretCiphertext  []byte             `json:"webhook_secret_ciphertext"`
+	ApiKeyCiphertext         []byte             `json:"-"` // 敏感字段：禁止JSON序列化
+	WebhookSecretCiphertext  []byte             `json:"-"` // 敏感字段：禁止JSON序列化
 	WebhookProxyUrl          string             `json:"webhook_proxy_url"`
 	RiskLabel                string             `json:"risk_label"`
 	SettlementBankAccountID  uuid.UUID          `json:"settlement_bank_account_id"`
@@ -106,7 +106,7 @@ type MerchantPayoutAddress struct {
 	TargetAsset         string             `json:"target_asset"`
 	TargetNetwork       string             `json:"target_network"`
 	AddressFormatType   string             `json:"address_format_type"`
-	TargetAddressEnc    []byte             `json:"target_address_enc"`
+	TargetAddressEnc    []byte             `json:"-"` // 敏感字段：禁止JSON序列化
 	TargetAddressHash   string             `json:"target_address_hash"`
 	TargetAddressMasked string             `json:"target_address_masked"`
 	AddressLabel        string             `json:"address_label"`
@@ -230,7 +230,7 @@ type WebhookIngressEvent struct {
 	EventType            string             `json:"event_type"`
 	IdempotencyKey       string             `json:"idempotency_key"`
 	PayloadHash          string             `json:"payload_hash"`
-	RawPayloadCiphertext []byte             `json:"raw_payload_ciphertext"`
+	RawPayloadCiphertext []byte             `json:"-"` // 敏感字段：禁止JSON序列化
 	Status               string             `json:"status"`
 	ErrorMessage         string             `json:"error_message"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
@@ -243,7 +243,7 @@ type WebhookReceiverProxy struct {
 	ProviderID             string             `json:"provider_id"`
 	WebhookUrl             string             `json:"webhook_url"`
 	SignatureAlgo          string             `json:"signature_algo"`
-	SecretCiphertext       []byte             `json:"secret_ciphertext"`
+	SecretCiphertext       []byte             `json:"-"` // 敏感字段：禁止JSON序列化
 	IpAllowlist            []byte             `json:"ip_allowlist"`
 	RateLimit              int32              `json:"rate_limit"`
 	Status                 string             `json:"status"`

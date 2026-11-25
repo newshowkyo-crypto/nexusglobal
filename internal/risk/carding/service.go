@@ -2,6 +2,7 @@ package carding
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -13,10 +14,12 @@ import (
 
 // Service 卡风控服务
 type Service struct {
-	gateway *Gateway
-	repo    *Repository
-	pool    *pgxpool.Pool
-	logger  *slog.Logger
+	gateway  *Gateway
+	repo     *Repository
+	rules    *RuleStore
+	detector *Detector
+	pool     *pgxpool.Pool
+	logger   *slog.Logger
 }
 
 // NewService 创建服务
@@ -25,11 +28,44 @@ func NewService(gateway *Gateway, repo *Repository, pool *pgxpool.Pool, logger *
 		logger = slog.Default()
 	}
 	return &Service{
-		gateway: gateway,
-		repo:    repo,
-		pool:    pool,
-		logger:  logger,
+		gateway:  gateway,
+		repo:     repo,
+		detector: NewDetector(pool),
+		pool:     pool,
+		logger:   logger,
 	}
+}
+
+// ScanAlerts 执行池化风险检测（P6）。
+func (s *Service) ScanAlerts(ctx context.Context, window time.Duration) ([]Alert, error) {
+	if s.detector == nil {
+		return nil, fmt.Errorf("risk detector not configured")
+	}
+	return s.detector.Scan(ctx, window)
+}
+
+// SetRuleStore 注入表化规则存储（P6），同时装入 Gateway。
+func (s *Service) SetRuleStore(store *RuleStore) {
+	s.rules = store
+	if s.gateway != nil {
+		s.gateway.SetRuleStore(store)
+	}
+}
+
+// ListRules 查询风控规则。
+func (s *Service) ListRules(ctx context.Context, scope, scopeID string) ([]domain.Rule, error) {
+	if s.rules == nil {
+		return nil, nil
+	}
+	return s.rules.List(ctx, scope, scopeID)
+}
+
+// UpsertRule 写入风控规则。
+func (s *Service) UpsertRule(ctx context.Context, rule domain.Rule) (uuid.UUID, error) {
+	if s.rules == nil {
+		return uuid.Nil, fmt.Errorf("risk rule store not configured")
+	}
+	return s.rules.Upsert(ctx, rule)
 }
 
 // Evaluate 风控评估
@@ -48,6 +84,8 @@ func (s *Service) Evaluate(ctx context.Context, req domain.CheckRequest) (domain
 		BuyerIPHash:  domain.HashIP(req.BuyerIP),
 		CardBINHash:  domain.HashBIN(req.CardBIN),
 		DeviceHash:   domain.HashDevice(req.DeviceID),
+		ChannelID:    req.ChannelID,
+		SiteID:       req.SiteID,
 		WindowType:   result.WindowType,
 		ThresholdHit: result.Threshold,
 		CurrentCount: result.CurrentCount,

@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"os"
 	"testing"
 	"time"
 
@@ -18,6 +20,17 @@ func setupTestDB(t *testing.T) (*TxManager, func()) {
 	}
 
 	ctx := context.Background()
+	// OPS-007: 外部共享数据库优先（TEST_DATABASE_DSN），testcontainers 兜底。
+	if dsn := os.Getenv("TEST_DATABASE_DSN"); dsn != "" {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Fatalf("connect external TEST_DATABASE_DSN: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;`); err != nil {
+			t.Fatalf("reset external database: %v", err)
+		}
+		return NewTxManager(pool), func() { pool.Close() }
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "postgres:15",

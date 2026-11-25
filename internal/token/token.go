@@ -121,6 +121,37 @@ func (s *Service) Redeem(ctx context.Context, cmd RedeemTokenCmd) (*Token, error
 	return token, nil
 }
 
+// Peek 校验 token 但不消费使用次数（SEC-003 修复）。
+//
+// 页面查看 / validate 属于"浏览"语义，不得消耗 single-use token——
+// 旧实现两处都调用 Redeem（MaxUses=1），导致打开页面即废掉 token、
+// 后续 charge 必然撞 ErrTokenUsed。只有最终确认（charge）才原子消费。
+// 校验规则与 Redeem 完全一致（过期/已用/来源/订单绑定），仅跳过 IncrementUseCount。
+func (s *Service) Peek(ctx context.Context, cmd RedeemTokenCmd) (*Token, error) {
+	token, err := s.store.Get(ctx, cmd.Value)
+	if err != nil {
+		return nil, ErrTokenNotFound
+	}
+
+	if time.Now().After(token.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+
+	if token.UsedCount >= token.MaxUses {
+		return nil, ErrTokenUsed
+	}
+
+	if token.AllowedOrigin != "" && cmd.Origin != token.AllowedOrigin {
+		return nil, ErrOriginMismatch
+	}
+
+	if cmd.OrderID != "" && token.OrderID != "" && cmd.OrderID != token.OrderID {
+		return nil, ErrTokenInvalid
+	}
+
+	return token, nil
+}
+
 func generateTokenValue() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

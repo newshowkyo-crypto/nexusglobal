@@ -74,11 +74,14 @@ INSERT INTO transactional_outbox (
 RETURNING *;
 
 -- name: ClaimOutboxBatch :many
+-- P0-5: 主 Outbox Worker 不得领取 VCC 专用事件（由 vcc_funding worker 处理）。
 UPDATE transactional_outbox
 SET status = 'Processing', locked_by = $1, locked_at = now(), updated_at = now()
+
 WHERE id IN (
     SELECT id FROM transactional_outbox
     WHERE status IN ('Pending', 'Failed') AND next_retry_at <= now()
+      AND event_type NOT IN ('VCC_CRYPTO_BRIDGE_REQUESTED', 'VCC_FUNDING_REQUESTED')
     ORDER BY created_at
     FOR UPDATE SKIP LOCKED
     LIMIT $2

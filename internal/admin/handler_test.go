@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -17,6 +18,8 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/nexusglobal/mamr/internal/platform/httpx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -25,10 +28,43 @@ import (
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
 )
 
-// setupTestDB creates a test database with migrations
+// setupTestDB creates a test database with migrations.
+// 优先使用 TEST_DATABASE_DSN 环境变量（外部 PostgreSQL），否则使用 testcontainers。
 func setupTestDB(t *testing.T) (*pgxpool.Pool, func()) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping testcontainers test in short mode")
+	}
 	ctx := context.Background()
+
+	// 优先使用外部数据库
+	if externalDSN := os.Getenv("TEST_DATABASE_DSN"); externalDSN != "" {
+		pool, err := pgxpool.New(ctx, externalDSN)
+		require.NoError(t, err)
+
+		// 重置数据库
+		_, err = pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;`)
+		require.NoError(t, err)
+
+		// Run migrations
+		migrationDir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
+		require.NoError(t, err)
+		migrationPath := filepath.ToSlash(migrationDir)
+		migrationURL := "file://" + migrationPath
+
+		m, err := migrate.New(migrationURL, externalDSN)
+		require.NoError(t, err)
+		defer m.Close()
+
+		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+			require.NoError(t, err, "failed to apply migrations")
+		}
+
+		cleanup := func() {
+			pool.Close()
+		}
+		return pool, cleanup
+	}
 
 	pgReq := testcontainers.ContainerRequest{
 		Image:        "postgres:15",
@@ -53,14 +89,33 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, func()) {
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 
+	for i := 0; i < 30; i++ {
+		if err := pool.Ping(ctx); err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+		if i == 29 {
+			require.NoError(t, pool.Ping(ctx), "failed to connect to database after 30 seconds")
+		}
+	}
+
 	// Run migrations
 	migrationDir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
 	require.NoError(t, err)
 	migrationPath := filepath.ToSlash(migrationDir)
 	migrationURL := "file://" + migrationPath
 
-	m, err := migrate.New(migrationURL, dsn)
-	require.NoError(t, err, "failed to create migrate instance")
+	var m *migrate.Migrate
+	for i := 0; i < 10; i++ {
+		m, err = migrate.New(migrationURL, dsn)
+		if err == nil {
+			break
+		}
+		time.Sleep(2 * time.Second)
+		if i == 9 {
+			require.NoError(t, err, "failed to create migrate instance after 10 retries")
+		}
+	}
 	defer m.Close()
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
@@ -169,7 +224,7 @@ func TestAdminAdapterProvidersAPI(t *testing.T) {
 		assert.Equal(t, providerCode, dbProvider.ProviderCode)
 		assert.Equal(t, "测试提供商", dbProvider.ProviderName)
 		assert.Equal(t, "CARD_ACQUIRER", dbProvider.AdapterType)
-		assert.Equal(t, "ACTIVE", dbProvider.Status)
+		assert.Equal(t, "DISABLED", dbProvider.Status) // P0-9: 新建 provider 默认 DISABLED，待审批启用
 	})
 }
 
@@ -407,7 +462,7 @@ func TestAdminBridgeProfilesAPI(t *testing.T) {
 		assert.Equal(t, profileName, dbProfile.Name)
 		assert.Equal(t, "USD", dbProfile.SourceAsset)
 		assert.Equal(t, "USDT", dbProfile.TargetAsset)
-		assert.True(t, dbProfile.Enabled)
+		assert.False(t, dbProfile.Enabled) // P0-9: 新建 profile 默认停用，待审批启用
 		assert.Equal(t, "IMMEDIATE", dbProfile.BatchingPolicy)
 	})
 }
@@ -492,7 +547,7 @@ func TestAdminWalletPoliciesAPI(t *testing.T) {
 		assert.Equal(t, policyCode, dbPolicy.PolicyCode)
 		assert.Equal(t, "ETHEREUM", dbPolicy.Network)
 		assert.Equal(t, "TRANSIT", dbPolicy.DestinationType)
-		assert.Equal(t, "ACTIVE", dbPolicy.Status)
+		assert.Equal(t, "DISABLED", dbPolicy.Status) // P0-9: 新建 policy 默认 DISABLED，待审批启用
 	})
 }
 
@@ -661,15 +716,24 @@ func TestV3IsolationGroupFreezeUnfreeze(t *testing.T) {
 			"reason":   "Test freeze reason",
 			"operator": "test_admin",
 		}
-		req, rec := makeRequestWithChiCtx("POST", "/admin/v3/isolation-groups/"+groupID.String()+"/freeze", reqBody, map[string]string{"id": groupID.String()})
+		req, rec := makeRequestWithAdminIdentity("POST", "/admin/v3/isolation-groups/"+groupID.String()+"/freeze", reqBody, httpx.AdminRoleOperator)
+		// 注入 chi route 参数
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", groupID.String())
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 		h.FreezeIsolationGroup(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 
-		// Verify group is frozen
+		// P0-9 契约：freeze 不直接改状态，而是创建 PENDING 审批
+		var resp map[string]interface{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, "pending_approval", resp["status"])
+		assert.NotEmpty(t, resp["approval_id"])
+
 		var status string
 		err := pool.QueryRow(ctx, `SELECT status FROM pipeline_isolation_groups WHERE id = $1`, groupID).Scan(&status)
 		require.NoError(t, err)
-		assert.Equal(t, "FROZEN", status)
+		assert.Equal(t, "ACTIVE", status, "PENDING 审批不得改变隔离组状态")
 	})
 
 	t.Run("POST /v3/isolation-groups/{id}/unfreeze", func(t *testing.T) {
@@ -677,15 +741,17 @@ func TestV3IsolationGroupFreezeUnfreeze(t *testing.T) {
 			"reason":   "Test unfreeze reason",
 			"operator": "test_admin",
 		}
-		req, rec := makeRequestWithChiCtx("POST", "/admin/v3/isolation-groups/"+groupID.String()+"/unfreeze", reqBody, map[string]string{"id": groupID.String()})
+		req, rec := makeRequestWithAdminIdentity("POST", "/admin/v3/isolation-groups/"+groupID.String()+"/unfreeze", reqBody, httpx.AdminRoleOperator)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", groupID.String())
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 		h.UnfreezeIsolationGroup(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 
-		// Verify group is active
-		var status string
-		err := pool.QueryRow(ctx, `SELECT status FROM pipeline_isolation_groups WHERE id = $1`, groupID).Scan(&status)
-		require.NoError(t, err)
-		assert.Equal(t, "ACTIVE", status)
+		// P0-9: unfreeze 同样只创建审批
+		var resp2 map[string]interface{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp2))
+		assert.Equal(t, "pending_approval", resp2["status"])
 	})
 }
 
@@ -731,10 +797,11 @@ func TestV3RFIDocumentsAPI(t *testing.T) {
 		_, err := pool.Exec(ctx, `INSERT INTO compliance_rfi_documents (id, order_id, merchant_id, document_type, source_data_hash, status) VALUES ($1, $2, $3, 'INVOICE', 'test_hash', 'PENDING')`, docID, orderID, merchantID)
 		require.NoError(t, err)
 
-		reqBody := map[string]interface{}{
-			"operator": "test_admin",
-		}
-		req, rec := makeRequestWithChiCtx("POST", "/admin/v3/rfi-documents/"+docID.String()+"/approve", reqBody, map[string]string{"id": docID.String()})
+		// ADM-013: operator 只取认证 Context，body 字段已废弃
+		req, rec := makeRequestWithAdminIdentity("POST", "/admin/v3/rfi-documents/"+docID.String()+"/approve", map[string]interface{}{}, httpx.AdminRoleOperator)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", docID.String())
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 		h.ApproveRFIDocument(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -751,11 +818,10 @@ func TestV3RFIDocumentsAPI(t *testing.T) {
 		_, err := pool.Exec(ctx, `INSERT INTO compliance_rfi_documents (id, order_id, merchant_id, document_type, source_data_hash, status) VALUES ($1, $2, $3, 'INVOICE', 'test_hash', 'PENDING')`, docID, orderID, merchantID)
 		require.NoError(t, err)
 
-		reqBody := map[string]interface{}{
-			"reason":   "Test rejection reason",
-			"operator": "test_admin",
-		}
-		req, rec := makeRequestWithChiCtx("POST", "/admin/v3/rfi-documents/"+docID.String()+"/reject", reqBody, map[string]string{"id": docID.String()})
+		req, rec := makeRequestWithAdminIdentity("POST", "/admin/v3/rfi-documents/"+docID.String()+"/reject", map[string]interface{}{"reason": "Test rejection reason"}, httpx.AdminRoleOperator)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", docID.String())
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 		h.RejectRFIDocument(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 

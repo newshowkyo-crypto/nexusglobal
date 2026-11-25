@@ -122,7 +122,7 @@ func (c *NxtapayClient) Authorize(ctx context.Context, req domain.AuthorizeReque
 	switch authResp.Status {
 	case "AUTHORIZED":
 		return &domain.AuthorizeResult{
-			TransactionID:    mustParseUUIDOptional(authResp.TransactionID),
+			TransactionID:    uuid.New(),
 			ProviderRef:      authResp.TransactionID,
 			Status:           domain.PaymentStatusAuthorized,
 			AuthorizedAmount: req.Amount,
@@ -491,18 +491,6 @@ func parseNxtapayTime(timeStr string) *time.Time {
 		return nil
 	}
 	return &t
-}
-
-// mustParseUUIDOptional 解析 UUID，可选
-func mustParseUUIDOptional(s string) uuid.UUID {
-	if s == "" {
-		return uuid.Nil
-	}
-	id, err := uuid.Parse(s)
-	if err != nil {
-		return uuid.Nil
-	}
-	return id
 }
 
 // Nxtapay API 响应结构

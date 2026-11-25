@@ -32,23 +32,40 @@ func (r *Repository) InsertRiskEvent(ctx context.Context, event *domain.RiskEven
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO risk_event (
 			id, tenant_id, merchant_id, app_id, decision, reason,
-			buyer_ip_hash, card_bin_hash, device_hash, window_type,
-			threshold_hit, current_count, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			buyer_ip_hash, card_bin_hash, device_hash, channel_id, site_id,
+			window_type, threshold_hit, current_count, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 		event.ID, event.TenantID, event.MerchantID, event.AppID,
 		event.Decision, event.Reason,
 		event.BuyerIPHash, event.CardBINHash, event.DeviceHash,
+		nullableUUID(event.ChannelID), nullIfEmpty(event.SiteID),
 		event.WindowType, event.ThresholdHit, event.CurrentCount,
 		event.CreatedAt)
 	return err
+}
+
+// nullableUUID 把零值 UUID 转成 SQL NULL。
+func nullableUUID(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
+}
+
+// nullIfEmpty 把空串转成 SQL NULL。
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // ListRiskEvents 查询风控审计日志
 func (r *Repository) ListRiskEvents(ctx context.Context, tenantID uuid.UUID, limit int) ([]domain.RiskEvent, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, tenant_id, merchant_id, app_id, decision, reason,
-			buyer_ip_hash, card_bin_hash, device_hash, window_type,
-			threshold_hit, current_count, created_at
+			buyer_ip_hash, card_bin_hash, device_hash, channel_id, site_id,
+			window_type, threshold_hit, current_count, created_at
 		FROM risk_event
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -62,14 +79,23 @@ func (r *Repository) ListRiskEvents(ctx context.Context, tenantID uuid.UUID, lim
 	var events []domain.RiskEvent
 	for rows.Next() {
 		var e domain.RiskEvent
+		var channelID *uuid.UUID
+		var siteID *string
 		err := rows.Scan(
 			&e.ID, &e.TenantID, &e.MerchantID, &e.AppID,
 			&e.Decision, &e.Reason,
 			&e.BuyerIPHash, &e.CardBINHash, &e.DeviceHash,
+			&channelID, &siteID,
 			&e.WindowType, &e.ThresholdHit, &e.CurrentCount,
 			&e.CreatedAt)
 		if err != nil {
 			return nil, err
+		}
+		if channelID != nil {
+			e.ChannelID = *channelID
+		}
+		if siteID != nil {
+			e.SiteID = *siteID
 		}
 		events = append(events, e)
 	}
@@ -79,18 +105,27 @@ func (r *Repository) ListRiskEvents(ctx context.Context, tenantID uuid.UUID, lim
 // GetRiskEventByID 根据 ID 查询
 func (r *Repository) GetRiskEventByID(ctx context.Context, id uuid.UUID) (*domain.RiskEvent, error) {
 	var e domain.RiskEvent
+	var channelID *uuid.UUID
+	var siteID *string
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, tenant_id, merchant_id, app_id, decision, reason,
-			buyer_ip_hash, card_bin_hash, device_hash, window_type,
-			threshold_hit, current_count, created_at
+			buyer_ip_hash, card_bin_hash, device_hash, channel_id, site_id,
+			window_type, threshold_hit, current_count, created_at
 		FROM risk_event WHERE id = $1`, id).Scan(
 		&e.ID, &e.TenantID, &e.MerchantID, &e.AppID,
 		&e.Decision, &e.Reason,
 		&e.BuyerIPHash, &e.CardBINHash, &e.DeviceHash,
+		&channelID, &siteID,
 		&e.WindowType, &e.ThresholdHit, &e.CurrentCount,
 		&e.CreatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if channelID != nil {
+		e.ChannelID = *channelID
+	}
+	if siteID != nil {
+		e.SiteID = *siteID
 	}
 	return &e, nil
 }

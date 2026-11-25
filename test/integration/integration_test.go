@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -33,6 +34,7 @@ import (
 	payoutrepo "github.com/nexusglobal/mamr/internal/payout/repository"
 	payoutservice "github.com/nexusglobal/mamr/internal/payout/service"
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
+	"github.com/nexusglobal/mamr/internal/platform/httpx"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
 	"github.com/nexusglobal/mamr/internal/platform/stream"
 	webhookdomain "github.com/nexusglobal/mamr/internal/webhook/domain"
@@ -51,7 +53,48 @@ type testEnv struct {
 
 func setupEnv(t *testing.T) *testEnv {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping testcontainers test in short mode")
+	}
 	ctx := context.Background()
+
+	// OPS-007: 外部共享 PostgreSQL 优先（本机 Docker 在 VM 内，testcontainers 端口不可达）。
+	if dsn := os.Getenv("TEST_DATABASE_DSN"); dsn != "" {
+		pool, err := postgres.NewPool(ctx, dsn)
+		require.NoError(t, err, "connect TEST_DATABASE_DSN")
+		_, err = pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;`)
+		require.NoError(t, err, "reset external database")
+		runMigrations(t, pool)
+
+		// Redis 可选：只有 stream 相关用例需要；不可达时置 nil，由用例自行 Skip。
+		var rdb *redis.Client
+		addr := os.Getenv("TEST_REDIS_ADDR")
+		if addr == "" {
+			addr = "127.0.0.1:6379"
+		}
+		client := redis.NewClient(&redis.Options{Addr: addr, DialTimeout: 2 * time.Second})
+		if client.Ping(ctx).Err() == nil {
+			rdb = client
+		} else {
+			_ = client.Close()
+		}
+
+		mockKMS, err := crypto.NewMockKMS("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+		require.NoError(t, err)
+
+		return &testEnv{
+			pool:      pool,
+			rdb:       rdb,
+			txm:       postgres.NewTxManager(pool),
+			encryptor: crypto.NewEncryptor(mockKMS),
+			cleanup: func() {
+				if rdb != nil {
+					_ = rdb.Close()
+				}
+				pool.Close()
+			},
+		}
+	}
 
 	pgReq := testcontainers.ContainerRequest{
 		Image:        "postgres:15",
@@ -141,9 +184,51 @@ func runMigrations(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
+// seedLedgerSettled 建立账本侧可出金余额（账本为主单位 decimal）。
+// P0 4.5 之后账本是唯一资金真相，出金前必须先有 SETTLED 余额。
+func seedLedgerSettled(t *testing.T, pool *pgxpool.Pool, merchantID uuid.UUID, currency string, amount decimal.Decimal) {
+	t.Helper()
+	seedLedgerAccount(t, pool, merchantID, currency, "SETTLED", amount)
+}
+
+// seedLedgerAccount 给指定商户科目建立期初余额，对手方记 PROVIDER_RECEIVABLE。
+func seedLedgerAccount(t *testing.T, pool *pgxpool.Pool, merchantID uuid.UUID, currency, accountType string, amount decimal.Decimal) {
+	t.Helper()
+	ctx := context.Background()
+	ledgerRepo := payoutrepo.NewLedgerRepo(pool)
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	accountID, err := ledgerRepo.GetOrCreateAccount(ctx, tx, merchantID, accountType, currency)
+	require.NoError(t, err)
+	receivableID, err := ledgerRepo.GetOrCreateAccount(ctx, tx, merchantID, "PROVIDER_RECEIVABLE", currency)
+	require.NoError(t, err)
+
+	_, err = ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
+		IdempotencyKey:  "seed_" + accountType + "_" + merchantID.String(),
+		TransactionType: ledgerdomain.TransactionType("DEPOSIT"),
+		AggregateType:   "test_seed",
+		AggregateID:     merchantID.String(),
+		Description:     "seed " + accountType + " for integration test",
+		Amount:          amount,
+		UpdateBalances:  true,
+		Entries: []ledgerdomain.Entry{
+			{AccountID: receivableID, Direction: ledgerdomain.DirectionDebit, Amount: amount},
+			{AccountID: accountID, Direction: ledgerdomain.DirectionCredit, Amount: amount},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+}
+
 func TestWebhookDuplicateDetection(t *testing.T) {
 	env := setupEnv(t)
 	defer env.cleanup()
+	if env.rdb == nil {
+		t.Skip("requires redis: set TEST_REDIS_ADDR or run a local redis on 127.0.0.1:6379")
+	}
 	ctx := context.Background()
 
 	repo := webhookrepo.New(env.pool)
@@ -218,17 +303,8 @@ func TestPayoutFreezeFlow(t *testing.T) {
 		`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, frozen_payout_balance)
 		 VALUES ($1, $2, 10000.00, 0)`, merchantID, currency)
 	require.NoError(t, err)
-
-	settledAccID := uuid.New()
-	frozenAccID := uuid.New()
-	_, err = env.pool.Exec(ctx,
-		`INSERT INTO ledger_account (id, merchant_id, account_type, currency) VALUES ($1, $2, 'SETTLED', $3)`,
-		settledAccID, merchantID, currency)
-	require.NoError(t, err)
-	_, err = env.pool.Exec(ctx,
-		`INSERT INTO ledger_account (id, merchant_id, account_type, currency) VALUES ($1, $2, 'FROZEN_PAYOUT', $3)`,
-		frozenAccID, merchantID, currency)
-	require.NoError(t, err)
+	// 账本侧同样要有可扣减余额：Freeze/Reserve 会真实记一笔 Dr SETTLED
+	seedLedgerSettled(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 
 	addrID := uuid.New()
 	_, err = env.pool.Exec(ctx,
@@ -301,6 +377,8 @@ func TestPayoutFreezeIdempotent(t *testing.T) {
 		`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, frozen_payout_balance)
 		 VALUES ($1, $2, 10000.00, 0)`, merchantID, currency)
 	require.NoError(t, err)
+	// 账本侧同样要有可扣减余额：Freeze/Reserve 会真实记一笔 Dr SETTLED
+	seedLedgerSettled(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 
 	addrID := uuid.New()
 	_, err = env.pool.Exec(ctx,
@@ -357,6 +435,8 @@ func TestConcurrentDoubleSpend(t *testing.T) {
 		`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, frozen_payout_balance)
 		 VALUES ($1, $2, 10000.00, 0)`, merchantID, currency)
 	require.NoError(t, err)
+	// 账本侧同样要有可扣减余额：Freeze/Reserve 会真实记一笔 Dr SETTLED
+	seedLedgerSettled(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 
 	addrID := uuid.New()
 	_, err = env.pool.Exec(ctx,
@@ -481,10 +561,17 @@ func TestMAEStatusTransition(t *testing.T) {
 func TestWebhookStreamPublish(t *testing.T) {
 	env := setupEnv(t)
 	defer env.cleanup()
+	if env.rdb == nil {
+		t.Skip("requires redis: set TEST_REDIS_ADDR or run a local redis on 127.0.0.1:6379")
+	}
 	ctx := context.Background()
 
 	producer := stream.NewProducer(env.rdb)
-	streamName := "stream:test:integration"
+	// stream/group 名按用例唯一：外部 Redis 在多次执行间不会清空，
+	// 固定名字会让第二次 XGroupCreateMkStream 报 BUSYGROUP。
+	streamName := "stream:test:integration:" + uuid.New().String()
+	groupName := "test-group-" + uuid.New().String()
+	defer func() { _ = env.rdb.Del(ctx, streamName).Err() }()
 
 	streamID, err := producer.Publish(ctx, streamName, stream.Event{
 		IdempotencyKey: "test-key-001",
@@ -497,7 +584,6 @@ func TestWebhookStreamPublish(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, streamID)
 
-	groupName := "test-group-integration"
 	err = env.rdb.XGroupCreateMkStream(ctx, streamName, groupName, "0").Err()
 	require.NoError(t, err)
 
@@ -600,16 +686,8 @@ func TestManualReviewBlocksRelease(t *testing.T) {
 		 VALUES ($1, $2, 0, 3000.00)`, merchantID, currency)
 	require.NoError(t, err)
 
-	settledAccID := uuid.New()
-	frozenAccID := uuid.New()
-	_, err = env.pool.Exec(ctx,
-		`INSERT INTO ledger_account (id, merchant_id, account_type, currency) VALUES ($1, $2, 'SETTLED', $3)`,
-		settledAccID, merchantID, currency)
-	require.NoError(t, err)
-	_, err = env.pool.Exec(ctx,
-		`INSERT INTO ledger_account (id, merchant_id, account_type, currency) VALUES ($1, $2, 'FROZEN_PAYOUT', $3)`,
-		frozenAccID, merchantID, currency)
-	require.NoError(t, err)
+	// 账本侧：FROZEN_PAYOUT 已有 3000，Release 才能记 Dr FROZEN_PAYOUT
+	seedLedgerAccount(t, env.pool, merchantID, currency, "FROZEN_PAYOUT", decimal.NewFromInt(3000))
 
 	addrID := uuid.New()
 	_, err = env.pool.Exec(ctx,
@@ -709,6 +787,8 @@ func TestPayoutConfirmSettlesFrozen(t *testing.T) {
 		`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, frozen_payout_balance)
 		 VALUES ($1, $2, 10000.00, 0)`, merchantID, currency)
 	require.NoError(t, err)
+	// 账本侧同样要有可扣减余额：Freeze/Reserve 会真实记一笔 Dr SETTLED
+	seedLedgerSettled(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 
 	addrID := uuid.New()
 	_, err = env.pool.Exec(ctx,
@@ -777,6 +857,8 @@ func TestPayoutReleaseRefundsFrozen(t *testing.T) {
 		`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, frozen_payout_balance)
 		 VALUES ($1, $2, 10000.00, 0)`, merchantID, currency)
 	require.NoError(t, err)
+	// 账本侧同样要有可扣减余额：Freeze/Reserve 会真实记一笔 Dr SETTLED
+	seedLedgerSettled(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 
 	addrID := uuid.New()
 	_, err = env.pool.Exec(ctx,
@@ -840,6 +922,8 @@ func TestPayoutConfirmIdempotent(t *testing.T) {
 		`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, frozen_payout_balance)
 		 VALUES ($1, $2, 10000.00, 0)`, merchantID, currency)
 	require.NoError(t, err)
+	// 账本侧同样要有可扣减余额：Freeze/Reserve 会真实记一笔 Dr SETTLED
+	seedLedgerSettled(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 
 	addrID := uuid.New()
 	_, err = env.pool.Exec(ctx,
@@ -903,6 +987,8 @@ func TestReserveHoldAndRelease(t *testing.T) {
 		`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, reserve_balance, frozen_payout_balance)
 		 VALUES ($1, $2, 10000.00, 0, 0)`, merchantID, currency)
 	require.NoError(t, err)
+	// 账本侧同样要有可扣减余额：ReserveHold 会真实记一笔 Dr SETTLED
+	seedLedgerSettled(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 
 	payoutRepo := payoutrepo.New(env.pool)
 	ledgerRepo := payoutrepo.NewLedgerRepo(env.pool)
@@ -927,9 +1013,10 @@ func TestReserveHoldAndRelease(t *testing.T) {
 	r, _ := decimal.NewFromString(reserve)
 	s, _ := decimal.NewFromString(settled)
 	a, _ := decimal.NewFromString(available)
+	// P0 4.5 后准备金从 settled 划出（settled 减少、reserve 增加），可用 = settled - frozen - reserve - dispute
 	assert.True(t, r.Equal(decimal.NewFromInt(2000)), "reserve should be 2000, got %s", reserve)
-	assert.True(t, s.Equal(decimal.NewFromInt(10000)), "settled should stay 10000, got %s", settled)
-	assert.True(t, a.Equal(decimal.NewFromInt(8000)), "available should be 8000, got %s", available)
+	assert.True(t, s.Equal(decimal.NewFromInt(8000)), "settled should be 8000 after hold, got %s", settled)
+	assert.True(t, a.Equal(decimal.NewFromInt(6000)), "available should be 6000, got %s", available)
 
 	assertLedgerBalanced(t, env.pool, holdKey)
 
@@ -952,11 +1039,11 @@ func TestReserveHoldAndRelease(t *testing.T) {
 	s, _ = decimal.NewFromString(settled)
 	a, _ = decimal.NewFromString(available)
 	assert.True(t, r.Equal(decimal.NewFromInt(1000)), "reserve should be 1000 after release, got %s", reserve)
-	assert.True(t, s.Equal(decimal.NewFromInt(11000)), "settled should be 11000 after release, got %s", settled)
-	assert.True(t, a.Equal(decimal.NewFromInt(10000)), "available should be 10000 after release, got %s", available)
+	assert.True(t, s.Equal(decimal.NewFromInt(9000)), "settled should be 9000 after release, got %s", settled)
+	assert.True(t, a.Equal(decimal.NewFromInt(8000)), "available should be 8000 after release, got %s", available)
 
 	assertLedgerBalanced(t, env.pool, releaseKey)
-	assertTreasuryConserved(t, env.pool, merchantID, currency, decimal.NewFromInt(12000))
+	assertTreasuryConserved(t, env.pool, merchantID, currency, decimal.NewFromInt(10000))
 }
 
 // R2-3: C1 端到端守卫测试
@@ -987,24 +1074,27 @@ func TestNonIntegerAmountPrecision(t *testing.T) {
 	ledgerRepo := payoutrepo.NewLedgerRepo(env.pool)
 	payoutSvc := payoutservice.New(payoutRepo, ledgerRepo, nil, env.txm, env.pool)
 
-	// 测试多种非整数金额
+	// 金额口径统一为「最小货币单位整数」，覆盖 100.50 / 0.01 / 10012.34 / 999.99 等主单位场景
 	testAmounts := []struct {
 		amount   decimal.Decimal
 		expected string
 	}{
-		{decimal.NewFromFloat(100.50), "100.50"},
-		{decimal.NewFromFloat(0.01), "0.01"},
-		{decimal.NewFromFloat(100.1234), "100.1234"},
-		{decimal.NewFromFloat(999.99), "999.99"},
+		{decimal.NewFromInt(10050), "10050"},
+		{decimal.NewFromInt(1), "1"},
+		{decimal.NewFromInt(1001234), "1001234"},
+		{decimal.NewFromInt(99999), "99999"},
 	}
 
 	for _, tc := range testAmounts {
 		t.Run(tc.amount.String(), func(t *testing.T) {
 			// 每个测试用例创建独立的 merchant ledger
 			testMerchantID := uuid.New()
+			// 账本侧与投影侧同为最小单位口径，保持一致量纲
+			seedLedgerSettled(t, env.pool, testMerchantID, currency, decimal.NewFromInt(2000000))
+			// 投影侧：merchant_treasury_ledger 以最小单位存储（20000.00 主单位 = 2,000,000 minor）
 			_, err := env.pool.Exec(ctx,
-				`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, frozen_payout_balance)
-				 VALUES ($1, $2, 10000.00, 0)`, testMerchantID, currency)
+				`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, available_payout_balance)
+				 VALUES ($1, $2, 2000000, 2000000)`, testMerchantID, currency)
 			require.NoError(t, err)
 
 			// 获取冻结前余额
@@ -1050,16 +1140,40 @@ func TestNonIntegerAmountPrecision(t *testing.T) {
 
 			settledDelta := sBefore.Sub(sAfter)
 			frozenDelta := fAfter.Sub(fBefore)
+			// 输入已是最小单位，期望值即输入本身
+			expectedMinor := tc.amount
 
-			assert.True(t, settledDelta.Equal(tc.amount),
-				"settled delta mismatch: expected=%s, got=%s", tc.amount.String(), settledDelta.String())
-			assert.True(t, frozenDelta.Equal(tc.amount),
-				"frozen delta mismatch: expected=%s, got=%s", tc.amount.String(), frozenDelta.String())
+			assert.True(t, settledDelta.Equal(expectedMinor),
+				"settled delta mismatch: expected=%s, got=%s", expectedMinor.String(), settledDelta.String())
+			assert.True(t, frozenDelta.Equal(expectedMinor),
+				"frozen delta mismatch: expected=%s, got=%s", expectedMinor.String(), frozenDelta.String())
 
 			// 断言分录借贷平衡
 			assertLedgerBalanced(t, env.pool, "payout_freeze:"+payoutID.String())
 		})
 	}
+
+	// 带小数的金额会被 IntPart 静默截断，必须在入口 fail-closed
+	t.Run("reject_fractional_amount", func(t *testing.T) {
+		testMerchantID := uuid.New()
+		seedLedgerSettled(t, env.pool, testMerchantID, currency, decimal.NewFromInt(2000000))
+		_, err := env.pool.Exec(ctx,
+			`INSERT INTO merchant_treasury_ledger (merchant_id, currency, settled_balance, available_payout_balance)
+			 VALUES ($1, $2, 2000000, 2000000)`, testMerchantID, currency)
+		require.NoError(t, err)
+
+		_, err = payoutSvc.Freeze(ctx, payoutservice.FreezeCmd{
+			MerchantID:      testMerchantID,
+			Amount:          decimal.NewFromFloat(100.1234),
+			FiatCurrency:    currency,
+			PayoutAddressID: addrID,
+			TargetAsset:     "USDT",
+			TargetNetwork:   "TRON_TRC20",
+			IdempotencyKey:  "precision-test-fractional-" + uuid.New().String(),
+		})
+		require.Error(t, err, "fractional minor amount must be rejected")
+		assert.Contains(t, err.Error(), "integer in minor units")
+	})
 }
 
 // TestAdminEncryptedFieldsStoredAsCiphertext 是 R3-3 的回归守卫：
@@ -1148,6 +1262,10 @@ func TestAdminEncryptedFieldsStoredAsCiphertext(t *testing.T) {
 
 	// 3) CreatePayoutAddress
 	merchantID := uuid.New()
+	tenantID := uuid.New()
+	_, err = env.pool.Exec(ctx, `INSERT INTO corporate_entity(id,tenant_id,name,legal_name,country)
+		VALUES ($1,$2,'Payout Test','Payout Test LLC','US')`, merchantID, tenantID)
+	require.NoError(t, err)
 	addrReq := map[string]interface{}{
 		"merchant_id": merchantID.String(), "target_asset": "USDT", "target_network": "TRON_TRC20",
 		"address_format_type": "TRON_TRC20", "target_address": "TN3W4H6rK2ce4vX9YnFQHwKENnHjoxb3m9",
@@ -1155,6 +1273,10 @@ func TestAdminEncryptedFieldsStoredAsCiphertext(t *testing.T) {
 	}
 	body, _ = json.Marshal(addrReq)
 	req = httptest.NewRequest(http.MethodPost, "/admin/payout-address", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), httpx.AdminContextKey{}, &httpx.AdminIdentity{
+		TenantID: tenantID.String(),
+		Role:     httpx.AdminRoleOperator,
+	}))
 	rec = httptest.NewRecorder()
 	adminH.CreatePayoutAddress(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code, "create address: %s", rec.Body.String())

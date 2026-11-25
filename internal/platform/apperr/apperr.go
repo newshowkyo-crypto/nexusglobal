@@ -50,8 +50,13 @@ var (
 	ErrBeneficiaryNotAllowed = New("BENEFICIARY_NOT_ALLOWED", http.StatusUnprocessableEntity)
 	ErrOutsideBankingWindow  = New("OUTSIDE_BANKING_WINDOW", http.StatusUnprocessableEntity)
 	ErrApprovalRequired      = New("APPROVAL_REQUIRED", http.StatusUnprocessableEntity)
+	ErrConfigInconsistent    = New("CONFIG_INCONSISTENT", http.StatusUnprocessableEntity)
 	ErrMAEDayLocked          = New("MAE_DAY_LOCKED", http.StatusLocked)
 	ErrRateLimited           = New("RATE_LIMITED", http.StatusTooManyRequests)
+
+	// G15: Provider capability 边界错误。
+	// ErrFailedPrecondition 表示前置条件不满足（如缺少真实 adapter 或凭证）。
+	ErrFailedPrecondition = New("FAILED_PRECONDITION", http.StatusFailedDependency)
 
 	ErrInternal             = New("INTERNAL", http.StatusInternalServerError)
 	ErrUnknownExternalState = New("UNKNOWN_EXTERNAL_STATE", http.StatusServiceUnavailable)

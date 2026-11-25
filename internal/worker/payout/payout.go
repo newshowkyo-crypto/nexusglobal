@@ -15,8 +15,10 @@ import (
 	"github.com/nexusglobal/mamr/internal/payout/domain"
 	"github.com/nexusglobal/mamr/internal/payout/repository"
 	"github.com/nexusglobal/mamr/internal/payout/repository/db"
+	"github.com/nexusglobal/mamr/internal/platform/failclosed"
 	"github.com/nexusglobal/mamr/internal/platform/money"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
+	"github.com/nexusglobal/mamr/internal/settlement/projection"
 	"github.com/nexusglobal/mamr/internal/worker/outbox"
 	"github.com/nexusglobal/mamr/pkg/external/lp"
 
@@ -32,6 +34,9 @@ type Worker struct {
 	txm        *postgres.TxManager
 	pool       *pgxpool.Pool
 	logger     *slog.Logger
+	// P0-2: failClosedSvc 用于 ExecutionCheck（LP dispatch 前）。
+	// 若为 nil，回退到进程内缓存检查（IsSystemLockedDown）。
+	failClosedSvc *failclosed.Service
 }
 
 func New(repo *repository.Repository, ledgerRepo *repository.LedgerRepo, lpCli lp.Client, feeService fee.FeeServiceInterface, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger) *Worker {
@@ -44,6 +49,42 @@ func New(repo *repository.Repository, ledgerRepo *repository.LedgerRepo, lpCli l
 		pool:       pool,
 		logger:     logger,
 	}
+}
+
+// NewWithFailClosed 创建带 Fail-Closed 服务注入的 payout WorkerC worker（P0-2）。
+//
+// 生产环境应使用此构造函数，确保 LP dispatch 前经过 ExecutionCheck。
+// failClosedSvc != nil 时，Handle 会在调用 lpCli.Payout 前调用 ExecutionCheck(ctx)，
+// 封锁或 DB 错误时返回 failclosed.ErrSystemLockdown。
+func NewWithFailClosed(repo *repository.Repository, ledgerRepo *repository.LedgerRepo, lpCli lp.Client, feeService fee.FeeServiceInterface, txm *postgres.TxManager, pool *pgxpool.Pool, logger *slog.Logger, failClosedSvc *failclosed.Service) *Worker {
+	return &Worker{
+		repo:          repo,
+		ledgerRepo:    ledgerRepo,
+		lpCli:         lpCli,
+		feeService:    feeService,
+		txm:           txm,
+		pool:          pool,
+		logger:        logger,
+		failClosedSvc: failClosedSvc,
+	}
+}
+
+// SetFailClosedService 注入 Fail-Closed 服务（用于已构造的 Worker）。
+func (w *Worker) SetFailClosedService(svc *failclosed.Service) {
+	w.failClosedSvc = svc
+}
+
+// executionCheck 是 LP dispatch 前的统一封锁检查（P0-2）。
+// 若 failClosedSvc 为 nil，回退到进程内缓存检查（向后兼容）。
+// 否则调用 ExecutionCheck(ctx)，封锁或 DB 错误时返回 failclosed.ErrSystemLockdown。
+func (w *Worker) executionCheck(ctx context.Context) error {
+	if w.failClosedSvc != nil {
+		return w.failClosedSvc.ExecutionCheck(ctx)
+	}
+	if failclosed.IsSystemLockedDown() {
+		return failclosed.ErrSystemLockdown
+	}
+	return nil
 }
 
 func (w *Worker) Handle(ctx context.Context, event outbox.OutboxEvent) error {
@@ -76,6 +117,15 @@ func (w *Worker) Handle(ctx context.Context, event outbox.OutboxEvent) error {
 		w.logger.Info("payout worker: skipping non-fxlocked",
 			"payout_id", payoutID, "status", payoutReq.Status)
 		return nil
+	}
+
+	// P0-2: LP dispatch 前强一致封锁检查。
+	// ExecutionCheck 查询 DB 持久状态，DB 错误时 fail-closed。
+	// 封锁时返回 error，outbox worker 会重试或进入死信。
+	if err := w.executionCheck(ctx); err != nil {
+		w.logger.Warn("payout worker: blocked by system lockdown, will retry",
+			"payout_id", payoutID, "err", err)
+		return fmt.Errorf("payout worker: system lockdown: %w", err)
 	}
 
 	amt := money.NumericToDecimal(payoutReq.Amount)
@@ -184,6 +234,17 @@ func (w *Worker) Confirm(ctx context.Context, payoutID uuid.UUID, providerRef st
 			return fmt.Errorf("confirm: no treasury ledger for merchant %s currency %s", payoutReq.MerchantID, payoutReq.FiatCurrency)
 		}
 
+		// SEC-005: 补齐成对分录（RED-13）。冻结解除 = Dr FROZEN_PAYOUT（负债↓），
+		// 对手方 = Cr LP_PAYABLE（平台对 LP 的付款负债↑）。
+		frozenAccID, accErr := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "FROZEN_PAYOUT", payoutReq.FiatCurrency)
+		if accErr != nil {
+			return fmt.Errorf("confirm: get frozen account: %w", accErr)
+		}
+		lpPayableAccID, accErr := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "LP_PAYABLE", payoutReq.FiatCurrency)
+		if accErr != nil {
+			return fmt.Errorf("confirm: get lp payable account: %w", accErr)
+		}
+
 		_, err = w.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  idempotencyKey,
 			TransactionType: ledgerdomain.TransactionType("PAYOUT_CONFIRM"),
@@ -191,19 +252,20 @@ func (w *Worker) Confirm(ctx context.Context, payoutID uuid.UUID, providerRef st
 			AggregateID:     payoutID.String(),
 			Description:     fmt.Sprintf("Payout confirm %s %s", amount.String(), payoutReq.FiatCurrency),
 			Amount:          amount,
+			UpdateBalances:  true,
+			Entries: []ledgerdomain.Entry{
+				{AccountID: frozenAccID, Direction: ledgerdomain.DirectionDebit, Amount: amount},
+				{AccountID: lpPayableAccID, Direction: ledgerdomain.DirectionCredit, Amount: amount},
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("confirm: ledger post: %w", err)
 		}
 
-		bal.FrozenPayoutBalance = bal.FrozenPayoutBalance.Sub(amount)
-		bal.AvailablePayoutBalance = bal.SettledBalance.
-			Sub(bal.ReserveBalance).
-			Sub(bal.FrozenPayoutBalance).
-			Sub(bal.DisputeHoldBalance)
-
-		if err := w.repo.UpdateBalance(ctx, tx, bal); err != nil {
-			return fmt.Errorf("confirm: update balance: %w", err)
+		// P0 4.5：投影唯一写入口（出金成功，冻结清零）
+		if err := projection.RemoveFrozenTx(ctx, tx, payoutReq.MerchantID, payoutReq.FiatCurrency,
+			money.ToMinor(amount).Int64()); err != nil {
+			return fmt.Errorf("confirm: update projection: %w", err)
 		}
 
 		if err := w.repo.UpdatePayoutRequestStatus(ctx, tx,
@@ -299,6 +361,17 @@ func (w *Worker) Release(ctx context.Context, payoutID uuid.UUID) error {
 			return fmt.Errorf("release: no treasury ledger for merchant %s currency %s", payoutReq.MerchantID, payoutReq.FiatCurrency)
 		}
 
+		// SEC-005: 补齐成对分录（RED-13）。释放回结算 = Dr FROZEN_PAYOUT（负债↓），
+		// Cr SETTLED（负债↑），与 Freeze 的 Dr SETTLED / Cr FROZEN_PAYOUT 互为逆操作。
+		frozenAccID, accErr := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "FROZEN_PAYOUT", payoutReq.FiatCurrency)
+		if accErr != nil {
+			return fmt.Errorf("release: get frozen account: %w", accErr)
+		}
+		settledAccID, accErr := w.ledgerRepo.GetOrCreateAccount(ctx, tx, payoutReq.MerchantID, "SETTLED", payoutReq.FiatCurrency)
+		if accErr != nil {
+			return fmt.Errorf("release: get settled account: %w", accErr)
+		}
+
 		_, err = w.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  idempotencyKey,
 			TransactionType: ledgerdomain.TransactionType("PAYOUT_RELEASE"),
@@ -306,20 +379,20 @@ func (w *Worker) Release(ctx context.Context, payoutID uuid.UUID) error {
 			AggregateID:     payoutID.String(),
 			Description:     fmt.Sprintf("Payout release %s %s", amount.String(), payoutReq.FiatCurrency),
 			Amount:          amount,
+			UpdateBalances:  true,
+			Entries: []ledgerdomain.Entry{
+				{AccountID: frozenAccID, Direction: ledgerdomain.DirectionDebit, Amount: amount},
+				{AccountID: settledAccID, Direction: ledgerdomain.DirectionCredit, Amount: amount},
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("release: ledger post: %w", err)
 		}
 
-		bal.FrozenPayoutBalance = bal.FrozenPayoutBalance.Sub(amount)
-		bal.SettledBalance = bal.SettledBalance.Add(amount)
-		bal.AvailablePayoutBalance = bal.SettledBalance.
-			Sub(bal.ReserveBalance).
-			Sub(bal.FrozenPayoutBalance).
-			Sub(bal.DisputeHoldBalance)
-
-		if err := w.repo.UpdateBalance(ctx, tx, bal); err != nil {
-			return fmt.Errorf("release: update balance: %w", err)
+		// P0 4.5：投影唯一写入口（出金失败，冻结退回可出金）
+		if err := projection.MoveFrozenToSettledTx(ctx, tx, payoutReq.MerchantID, payoutReq.FiatCurrency,
+			money.ToMinor(amount).Int64()); err != nil {
+			return fmt.Errorf("release: update projection: %w", err)
 		}
 
 		return w.repo.UpdatePayoutRequestStatus(ctx, tx,

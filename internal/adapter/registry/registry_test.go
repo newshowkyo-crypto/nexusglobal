@@ -92,6 +92,14 @@ func (m *mockRepository) GetAdapterChannelsByEntity(ctx context.Context, entityI
 	return result, nil
 }
 
+func (m *mockRepository) GetAllAdapterChannels(ctx context.Context) ([]domain.AdapterChannel, error) {
+	result := make([]domain.AdapterChannel, 0, len(m.channels))
+	for _, c := range m.channels {
+		result = append(result, *c)
+	}
+	return result, nil
+}
+
 func (m *mockRepository) GetAdapterCredential(ctx context.Context, providerID uuid.UUID, channelID *uuid.UUID, credType domain.CredentialType) (*domain.AdapterCredentialVault, error) {
 	key := providerID.String() + "|"
 	if channelID != nil {

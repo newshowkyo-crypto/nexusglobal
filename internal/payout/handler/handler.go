@@ -233,70 +233,11 @@ func (h *Handler) Freeze(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) FxLock(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	payoutID, err := uuid.Parse(idStr)
-	if err != nil {
-		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
-		return
-	}
-	if h.svc == nil {
-		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
-		return
-	}
-	req, err := h.svc.GetPayoutRequest(r.Context(), payoutID)
-	if err != nil || req == nil {
-		writeError(w, apperr.ErrNotFound.WithMessage("payout request not found"))
-		return
-	}
-	if req.Status != string(domain.StatusBalanceFrozen) {
-		writeError(w, apperr.ErrIllegalTransition.WithMessage("payout not in BalanceFrozen status"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "FxLocked"})
-}
-
-func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	payoutID, err := uuid.Parse(idStr)
-	if err != nil {
-		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
-		return
-	}
-	if h.svc == nil {
-		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
-		return
-	}
-	req, err := h.svc.GetPayoutRequest(r.Context(), payoutID)
-	if err != nil || req == nil {
-		writeError(w, apperr.ErrNotFound.WithMessage("payout request not found"))
-		return
-	}
-	if req.Status != string(domain.StatusFxLocked) {
-		writeError(w, apperr.ErrIllegalTransition.WithMessage("payout not in FxLocked status"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "LPProcessing"})
-}
-
-func (h *Handler) Reconcile(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	payoutID, err := uuid.Parse(idStr)
-	if err != nil {
-		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid payout id"))
-		return
-	}
-	if h.svc == nil {
-		writeError(w, apperr.ErrInternal.WithMessage("payout service not initialized"))
-		return
-	}
-	req, err := h.svc.GetPayoutRequest(r.Context(), payoutID)
-	if err != nil || req == nil {
-		writeError(w, apperr.ErrNotFound.WithMessage("payout request not found"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "Confirmed"})
-}
+// SEC-012: 原 /internal/payout/{id}/fx-lock|submit|reconcile 三个假成功端点已删除。
+// 它们只读取状态并返回硬编码 FxLocked / LPProcessing / Confirmed，不执行任何动作。
+// 真实路径：Freeze 写 Outbox FX_LOCK_REQUESTED → fxlock worker 调 LP 锁价 →
+// 写 LP_PAYOUT_REQUESTED → payout worker 调 LP 出金 → reconcile worker /
+// LP Webhook 依据 Provider 证据推进终态（RED-02/RED-03）。
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

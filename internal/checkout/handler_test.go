@@ -3,6 +3,7 @@ package checkout
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/nexusglobal/mamr/internal/platform/failclosed"
 	"github.com/nexusglobal/mamr/internal/risk/carding/domain"
 	"github.com/nexusglobal/mamr/internal/token"
 )
@@ -38,10 +40,19 @@ func (m *mockTokenService) Redeem(ctx context.Context, cmd token.RedeemTokenCmd)
 	return args.Get(0).(*token.Token), args.Error(1)
 }
 
+func (m *mockTokenService) Peek(ctx context.Context, cmd token.RedeemTokenCmd) (*token.Token, error) {
+	args := m.Called(ctx, cmd)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*token.Token), args.Error(1)
+}
+
 func TestHandleValidateToken_Success(t *testing.T) {
 	tokenSvc := new(mockTokenService)
 
 	h := &Handler{
+
 		tokenSvc: tokenSvc,
 	}
 
@@ -52,7 +63,7 @@ func TestHandleValidateToken_Success(t *testing.T) {
 		MerchantID: "merchant-789",
 	}
 
-	tokenSvc.On("Redeem", mock.Anything, mock.Anything).Return(tkn, nil)
+	tokenSvc.On("Peek", mock.Anything, mock.Anything).Return(tkn, nil)
 
 	req := httptest.NewRequest("GET", "/api/checkout/validate?token=test-value", nil)
 	w := httptest.NewRecorder()
@@ -80,12 +91,11 @@ func TestHandleValidateToken_MissingToken(t *testing.T) {
 
 func TestHandleValidateToken_InvalidToken(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
 		tokenSvc: tokenSvc,
 	}
 
-	tokenSvc.On("Redeem", mock.Anything, mock.Anything).Return(nil, token.ErrTokenNotFound)
+	tokenSvc.On("Peek", mock.Anything, mock.Anything).Return(nil, token.ErrTokenNotFound)
 
 	req := httptest.NewRequest("GET", "/api/checkout/validate?token=invalid", nil)
 	w := httptest.NewRecorder()
@@ -97,12 +107,11 @@ func TestHandleValidateToken_InvalidToken(t *testing.T) {
 
 func TestHandleValidateToken_ExpiredToken(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
 		tokenSvc: tokenSvc,
 	}
 
-	tokenSvc.On("Redeem", mock.Anything, mock.Anything).Return(nil, token.ErrTokenExpired)
+	tokenSvc.On("Peek", mock.Anything, mock.Anything).Return(nil, token.ErrTokenExpired)
 
 	req := httptest.NewRequest("GET", "/api/checkout/validate?token=expired", nil)
 	w := httptest.NewRecorder()
@@ -114,12 +123,11 @@ func TestHandleValidateToken_ExpiredToken(t *testing.T) {
 
 func TestHandleValidateToken_UsedToken(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
 		tokenSvc: tokenSvc,
 	}
 
-	tokenSvc.On("Redeem", mock.Anything, mock.Anything).Return(nil, token.ErrTokenUsed)
+	tokenSvc.On("Peek", mock.Anything, mock.Anything).Return(nil, token.ErrTokenUsed)
 
 	req := httptest.NewRequest("GET", "/api/checkout/validate?token=used", nil)
 	w := httptest.NewRecorder()
@@ -132,10 +140,10 @@ func TestHandleValidateToken_UsedToken(t *testing.T) {
 func TestHandleCharge_Success(t *testing.T) {
 	tokenSvc := new(mockTokenService)
 	paymentGW := NewMockPaymentGateway()
-
 	h := &Handler{
-		tokenSvc:  tokenSvc,
-		paymentGW: paymentGW,
+		tokenSvc:      tokenSvc,
+		paymentGW:     paymentGW,
+		orderProvider: NewMockOrderProvider(),
 	}
 
 	tkn := &token.Token{
@@ -177,7 +185,6 @@ func TestHandleCharge_MissingToken(t *testing.T) {
 
 func TestHandleCharge_InvalidToken(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
 		tokenSvc: tokenSvc,
 	}
@@ -196,7 +203,6 @@ func TestHandleCharge_InvalidToken(t *testing.T) {
 
 func TestHandleCharge_ExpiredToken(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
 		tokenSvc: tokenSvc,
 	}
@@ -215,7 +221,6 @@ func TestHandleCharge_ExpiredToken(t *testing.T) {
 
 func TestHandleCharge_UsedToken(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
 		tokenSvc: tokenSvc,
 	}
@@ -234,9 +239,9 @@ func TestHandleCharge_UsedToken(t *testing.T) {
 
 func TestMerchantDescriptor_Displayed(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
-		tokenSvc: tokenSvc,
+		tokenSvc:      tokenSvc,
+		orderProvider: NewMockOrderProvider(),
 	}
 
 	tkn := &token.Token{
@@ -245,7 +250,7 @@ func TestMerchantDescriptor_Displayed(t *testing.T) {
 		MerchantID: "merchant-789",
 	}
 
-	tokenSvc.On("Redeem", mock.Anything, mock.Anything).Return(tkn, nil)
+	tokenSvc.On("Peek", mock.Anything, mock.Anything).Return(tkn, nil)
 
 	req := httptest.NewRequest("GET", "/api/checkout/validate?token=test-value", nil)
 	w := httptest.NewRecorder()
@@ -262,12 +267,11 @@ func TestMerchantDescriptor_Displayed(t *testing.T) {
 
 func TestOriginValidation(t *testing.T) {
 	tokenSvc := new(mockTokenService)
-
 	h := &Handler{
 		tokenSvc: tokenSvc,
 	}
 
-	tokenSvc.On("Redeem", mock.Anything, mock.Anything).Return(nil, token.ErrOriginMismatch)
+	tokenSvc.On("Peek", mock.Anything, mock.Anything).Return(nil, token.ErrOriginMismatch)
 
 	req := httptest.NewRequest("GET", "/api/checkout/validate?token=test-value", nil)
 	req.Header.Set("Origin", "https://evil.com")
@@ -289,6 +293,23 @@ func TestMockPaymentGateway_Success(t *testing.T) {
 	assert.NotNil(t, result)
 	assert.Equal(t, "captured", result.Status)
 	assert.Equal(t, "txn_order-123", result.TransactionID)
+}
+
+func TestMockPaymentGateway_SystemLockdownFailClosed(t *testing.T) {
+	failclosed.ClearSystemLockdownForTest()
+	defer failclosed.ClearSystemLockdownForTest()
+	failclosed.ActivateSystemLockdown()
+
+	gw := NewMockPaymentGateway()
+	result, err := gw.Charge(context.Background(), PaymentRequest{
+		OrderID: "order-locked",
+		Amount:  decimal.NewFromInt(100),
+	})
+
+	assert.Nil(t, result)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrSystemLockdownFailClosed))
+	assert.Contains(t, err.Error(), failclosed.SystemLockdownCode)
 }
 
 func TestMockPaymentGateway_Failure(t *testing.T) {
@@ -336,6 +357,7 @@ func TestMockPaymentGateway_PerOrderScenario(t *testing.T) {
 	assert.Equal(t, ErrPaymentFailed, err)
 
 	// 特定订单超时
+
 	gw.SetTimeoutDelay(10 * time.Millisecond)
 	result, err = gw.Charge(context.Background(), PaymentRequest{OrderID: "order-timeout"})
 	assert.Error(t, err)
@@ -346,10 +368,10 @@ func TestHandleCharge_OrderFail_402(t *testing.T) {
 	tokenSvc := new(mockTokenService)
 	paymentGW := NewMockPaymentGateway()
 	paymentGW.SetScenario("order-fail", ScenarioFailure)
-
 	h := &Handler{
-		tokenSvc:  tokenSvc,
-		paymentGW: paymentGW,
+		tokenSvc:      tokenSvc,
+		paymentGW:     paymentGW,
+		orderProvider: NewMockOrderProvider(),
 	}
 
 	tkn := &token.Token{
@@ -374,10 +396,10 @@ func TestHandleCharge_OrderTimeout_504(t *testing.T) {
 	paymentGW := NewMockPaymentGateway()
 	paymentGW.SetScenario("order-timeout", ScenarioTimeout)
 	paymentGW.SetTimeoutDelay(10 * time.Millisecond)
-
 	h := &Handler{
-		tokenSvc:  tokenSvc,
-		paymentGW: paymentGW,
+		tokenSvc:      tokenSvc,
+		paymentGW:     paymentGW,
+		orderProvider: NewMockOrderProvider(),
 	}
 
 	tkn := &token.Token{
@@ -419,11 +441,11 @@ func TestHandleCharge_RiskBlocked_429(t *testing.T) {
 	tokenSvc := new(mockTokenService)
 	paymentGW := NewMockPaymentGateway()
 	riskGW := new(mockRiskGateway)
-
 	h := &Handler{
-		tokenSvc:    tokenSvc,
-		paymentGW:   paymentGW,
-		riskGateway: riskGW,
+		orderProvider: NewMockOrderProvider(),
+		tokenSvc:      tokenSvc,
+		paymentGW:     paymentGW,
+		riskGateway:   riskGW,
 	}
 
 	tkn := &token.Token{
@@ -450,6 +472,7 @@ func TestHandleCharge_RiskBlocked_429(t *testing.T) {
 	h.HandleCharge(w, req)
 
 	// 应返回 429
+
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 
 	var resp map[string]interface{}
@@ -463,11 +486,12 @@ func TestHandleCharge_RiskCooldown_403(t *testing.T) {
 	tokenSvc := new(mockTokenService)
 	paymentGW := NewMockPaymentGateway()
 	riskGW := new(mockRiskGateway)
-
+	orderProvider := NewMockOrderProvider()
 	h := &Handler{
-		tokenSvc:    tokenSvc,
-		paymentGW:   paymentGW,
-		riskGateway: riskGW,
+		orderProvider: orderProvider,
+		tokenSvc:      tokenSvc,
+		paymentGW:     paymentGW,
+		riskGateway:   riskGW,
 	}
 
 	tkn := &token.Token{
@@ -504,12 +528,13 @@ func TestHandleCharge_RiskCooldown_403(t *testing.T) {
 func TestHandleCharge_RiskAllowed_PaymentCalled(t *testing.T) {
 	tokenSvc := new(mockTokenService)
 	paymentGW := NewMockPaymentGateway()
+	orderProvider := NewMockOrderProvider()
 	riskGW := new(mockRiskGateway)
-
 	h := &Handler{
-		tokenSvc:    tokenSvc,
-		paymentGW:   paymentGW,
-		riskGateway: riskGW,
+		orderProvider: orderProvider,
+		tokenSvc:      tokenSvc,
+		paymentGW:     paymentGW,
+		riskGateway:   riskGW,
 	}
 
 	tkn := &token.Token{
@@ -548,11 +573,11 @@ func TestHandleCharge_RiskAllowed_PaymentFailed_RecordFailure(t *testing.T) {
 	paymentGW := NewMockPaymentGateway()
 	paymentGW.SetScenario("order-fail", ScenarioFailure)
 	riskGW := new(mockRiskGateway)
-
 	h := &Handler{
-		tokenSvc:    tokenSvc,
-		paymentGW:   paymentGW,
-		riskGateway: riskGW,
+		orderProvider: NewMockOrderProvider(),
+		tokenSvc:      tokenSvc,
+		paymentGW:     paymentGW,
+		riskGateway:   riskGW,
 	}
 
 	tkn := &token.Token{

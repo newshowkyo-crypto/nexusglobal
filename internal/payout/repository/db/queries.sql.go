@@ -24,11 +24,13 @@ func (q *Queries) AckOutboxEvent(ctx context.Context, id uuid.UUID) error {
 }
 
 const claimOutboxBatch = `-- name: ClaimOutboxBatch :many
+-- P0-5: 主 Outbox Worker 不得领取 VCC 专用事件（由 vcc_funding worker 处理）。
 UPDATE transactional_outbox
 SET status = 'Processing', locked_by = $1, locked_at = now(), updated_at = now()
 WHERE id IN (
     SELECT id FROM transactional_outbox
     WHERE status IN ('Pending', 'Failed') AND next_retry_at <= now()
+      AND event_type NOT IN ('VCC_CRYPTO_BRIDGE_REQUESTED', 'VCC_FUNDING_REQUESTED', 'VCC_ISSUING_FUNDING_REQUESTED')
     ORDER BY created_at
     FOR UPDATE SKIP LOCKED
     LIMIT $2
@@ -233,7 +235,7 @@ type InsertPayoutAddressParams struct {
 	TargetAsset         string    `json:"target_asset"`
 	TargetNetwork       string    `json:"target_network"`
 	AddressFormatType   string    `json:"address_format_type"`
-	TargetAddressEnc    []byte    `json:"target_address_enc"`
+	TargetAddressEnc    []byte    `json:"-"` // 敏感字段：禁止JSON序列化
 	TargetAddressHash   string    `json:"target_address_hash"`
 	TargetAddressMasked string    `json:"target_address_masked"`
 	AddressLabel        string    `json:"address_label"`

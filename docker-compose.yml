@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   postgres:
@@ -32,6 +31,7 @@ services:
     command: ["/app/migrate"]
     environment:
       POSTGRES_DSN: postgres://nexus:nexus@postgres:5432/nexus?sslmode=disable
+      MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,15 +42,27 @@ services:
     ports:
       - "8080:8080"
     environment:
-      APP_ENV: local
-      HTTP_ADDR: ":8080"
+      APP_ENV: ${APP_ENV:-local}
+      HTTP_ADDR: ${HTTP_ADDR:-:8080}
       POSTGRES_DSN: postgres://nexus:nexus@postgres:5432/nexus?sslmode=disable
       REDIS_ADDR: redis:6379
-      EXTERNAL_MODE: mock
-      KMS_MODE: mock
-      MASTER_KEY_BASE64: dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=
-      JWT_SECRET: dev-jwt-secret
-      INTERNAL_TOKEN: dev-internal-token
+      EXTERNAL_MODE: ${EXTERNAL_MODE:-mock}
+      KMS_MODE: ${KMS_MODE:-mock}
+      ACQUIRER_MODE: ${ACQUIRER_MODE:-mock}
+      ACQUIRER_PROVIDER: ${ACQUIRER_PROVIDER:-mock}
+      ISSUING_PROVIDER: ${ISSUING_PROVIDER:-mock}
+      VCC_FUNDING_PROVIDER: ${VCC_FUNDING_PROVIDER:-mock}
+      CHECKOUT_ORDER_PROVIDER: ${CHECKOUT_ORDER_PROVIDER:-mock}
+      MASTER_KEY_BASE64: ${MASTER_KEY_BASE64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      JWT_SECRET: ${JWT_SECRET:-nexusglobal-local-jwt-secret-change-me-2026}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-nexusglobal-local-internal-token-change-me-2026}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-nexusglobal-local-session-secret-change-me-2026}
+      WEBHOOK_SIGNING_KEY: ${WEBHOOK_SIGNING_KEY:-nexusglobal-local-webhook-signing-key-2026}
+      # P3: Hyperswitch 编排层（可选）。留空时使用 vault 凭证或 mock provider。
+      HYPERSWITCH_API_KEY: ${HYPERSWITCH_API_KEY:-}
+      HYPERSWITCH_WEBHOOK_SECRET: ${HYPERSWITCH_WEBHOOK_SECRET:-}
+      HYPERSWITCH_BASE_URL: ${HYPERSWITCH_BASE_URL:-}
+      HYPERSWITCH_PROFILE_ID: ${HYPERSWITCH_PROFILE_ID:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -61,17 +73,120 @@ services:
     build: .
     command: ["/app/worker"]
     environment:
-      APP_ENV: local
+      APP_ENV: ${APP_ENV:-local}
       POSTGRES_DSN: postgres://nexus:nexus@postgres:5432/nexus?sslmode=disable
       REDIS_ADDR: redis:6379
-      EXTERNAL_MODE: mock
-      KMS_MODE: mock
-      MASTER_KEY_BASE64: dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=
+      EXTERNAL_MODE: ${EXTERNAL_MODE:-mock}
+      KMS_MODE: ${KMS_MODE:-mock}
+      ACQUIRER_MODE: ${ACQUIRER_MODE:-mock}
+      ACQUIRER_PROVIDER: ${ACQUIRER_PROVIDER:-mock}
+      ISSUING_PROVIDER: ${ISSUING_PROVIDER:-mock}
+      VCC_FUNDING_PROVIDER: ${VCC_FUNDING_PROVIDER:-mock}
+      CHECKOUT_ORDER_PROVIDER: ${CHECKOUT_ORDER_PROVIDER:-mock}
+      MASTER_KEY_BASE64: ${MASTER_KEY_BASE64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      JWT_SECRET: ${JWT_SECRET:-nexusglobal-local-jwt-secret-change-me-2026}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-nexusglobal-local-internal-token-change-me-2026}
+      WEBHOOK_SIGNING_KEY: ${WEBHOOK_SIGNING_KEY:-nexusglobal-local-webhook-signing-key-2026}
+      HYPERSWITCH_API_KEY: ${HYPERSWITCH_API_KEY:-}
+      HYPERSWITCH_WEBHOOK_SECRET: ${HYPERSWITCH_WEBHOOK_SECRET:-}
+      HYPERSWITCH_BASE_URL: ${HYPERSWITCH_BASE_URL:-}
+      HYPERSWITCH_PROFILE_ID: ${HYPERSWITCH_PROFILE_ID:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
 
+  # P3: Hyperswitch 自托管编排层（可选，默认不启动）
+  #   启动：docker compose --profile hyperswitch up -d
+  #   结构对齐官方一键脚本（scripts/setup.sh 产出的 compose）：
+  #     hyperswitch-server(8080，容器内自动执行 DB 迁移，无需独立 migration_runner)
+  #     hyperswitch-control-center(9000 管理台) / hyperswitch-web(9050 SDK)
+  #     hyperswitch-db / redis-standalone 独立于主库，仅内网可达（不占用宿主 5432/6379）。
+  #   宿主访问：server http://localhost:8081、control-center http://localhost:9000、SDK http://localhost:9050。
+  #   注：官方最新镜像为 hyperswitch/hyperswitch-router:standalone；若 juspaydotin 源拉取失败可替换。
+  hyperswitch-server:
+    image: ${HS_SERVER_IMAGE:-juspaydotin/hyperswitch-server:latest}
+    profiles: ["hyperswitch"]
+    ports:
+      - "8081:8080"
+    environment:
+      RUN_ENV: local
+      ROUTER__HOST: 0.0.0.0
+      ROUTER__PORT: 8080
+      MASTER_DB__HOST: hyperswitch-db
+      MASTER_DB__PORT: 5432
+      MASTER_DB__DBNAME: hyperswitch
+      MASTER_DB__USERNAME: dbuser
+      MASTER_DB__PASSWORD: dbpass
+      MASTER_DB__CONNECTION_TIMEOUT: 3000
+      REDIS__HOST: redis-standalone
+      REDIS__PORT: 6379
+      REDIS__CONNECT_TIMEOUT: 3000
+      # 官方 dev 默认私钥集（4 把 128-bit key 的 JSON 数组 base64）。
+      # 生产必须通过 HS_PRIVATE_KEY_SET 覆盖为自生成密钥。
+      SERVER__PRIVATE_KEY_SET: ${HS_PRIVATE_KEY_SET:-W3siaWQiOiAiS0VZX0lEXzEiLCAia2V5IjogIjE2ZjgxOWIyMzcxZTQyYjRiYWRjNzA0OTc1MjUzYzAxIn0seyJpZCI6ICJLRVlfSURfMiIsICJrZXkiOiAiY2IwMzg1YmFjMTI0OTc2OTNlZjM1YzM4MTZhMjQyYTgifSx7ImlkIjogIktFWV9JRF8zIiwgImtleSI6ICI3Y2I0MjdhNzU0OGM0ZTA1YjVhY2Y0NjU4MjE0ZjYwMSJ9LHsiaWQiOiAiS0VZX0lEXzQiLCAia2V5IjogImEwOGU0ZjFjNThiNjQ5MTdiNWFhZWE3NTc0YTBlOTM2In1d}
+      SERVER__BASE_URL: http://localhost:8081
+    depends_on:
+      hyperswitch-db:
+        condition: service_healthy
+      redis-standalone:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  hyperswitch-control-center:
+    image: juspaydotin/hyperswitch-control-center:latest
+    profiles: ["hyperswitch"]
+    ports:
+      - "9000:8080"
+    environment:
+      CONFIG__DATABASE__URL: postgres://dbuser:dbpass@hyperswitch-db:5432/hyperswitch
+      CONFIG__SERVER__HOST: 0.0.0.0
+      CONFIG__SERVER__PORT: 8080
+      # 浏览器可达的 server 地址（宿主映射端口）
+      CONFIG__SERVER__BASE_URL: http://localhost:8081
+    depends_on:
+      hyperswitch-server:
+        condition: service_healthy
+
+  hyperswitch-web:
+    image: juspaydotin/hyperswitch-web:latest
+    profiles: ["hyperswitch"]
+    ports:
+      - "9050:9050"
+    depends_on:
+      hyperswitch-server:
+        condition: service_healthy
+
+  hyperswitch-db:
+    image: postgres:15
+    profiles: ["hyperswitch"]
+    environment:
+      POSTGRES_USER: dbuser
+      POSTGRES_PASSWORD: dbpass
+      POSTGRES_DB: hyperswitch
+    volumes:
+      - hyperswitch_dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbuser -d hyperswitch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-standalone:
+    image: redis:7
+    profiles: ["hyperswitch"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   pgdata:
+  hyperswitch_dbdata:

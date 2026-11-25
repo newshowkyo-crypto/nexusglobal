@@ -20,6 +20,7 @@ import (
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
 	"github.com/nexusglobal/mamr/internal/platform/money"
 	"github.com/nexusglobal/mamr/internal/platform/postgres"
+	"github.com/nexusglobal/mamr/internal/settlement/projection"
 	"github.com/nexusglobal/mamr/pkg/validator"
 )
 
@@ -72,7 +73,25 @@ func New(repo PayoutRepository, ledgerRepo LedgerRepository, encryptor *crypto.E
 	return &Service{repo: repo, ledgerRepo: ledgerRepo, encryptor: encryptor, txm: txm, pool: pool}
 }
 
+// validateMinorAmount 校验金额为最小单位整数。
+//
+// 账本与投影的金额口径统一为「最小货币单位整数」（与结算/费率/退款一致），
+// 带小数的金额会被 IntPart 静默截断，因此必须在入口 fail-closed。
+func validateMinorAmount(amount decimal.Decimal) error {
+	if amount.IsNegative() {
+		return apperr.ErrInvalidArgument.WithMessage("amount must not be negative")
+	}
+	if !amount.IsInteger() {
+		return apperr.ErrInvalidArgument.WithMessage(
+			"amount must be an integer in minor units (e.g. 10050 for 100.50), got " + amount.String())
+	}
+	return nil
+}
+
 func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, error) {
+	if err := validateMinorAmount(cmd.Amount); err != nil {
+		return FreezeResult{}, err
+	}
 	existing, err := s.repo.GetPayoutRequestByIdempotencyKey(ctx, cmd.IdempotencyKey)
 	if err != nil {
 		return FreezeResult{}, err
@@ -97,7 +116,6 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 		}
 
 		available := bal.SettledBalance.
-			Sub(bal.ReserveBalance).
 			Sub(bal.FrozenPayoutBalance).
 			Sub(bal.DisputeHoldBalance)
 
@@ -106,11 +124,11 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 				fmt.Sprintf("available=%s, requested=%s", available.String(), cmd.Amount.String()))
 		}
 
-		bal.SettledBalance = bal.SettledBalance.Sub(cmd.Amount)
-		bal.FrozenPayoutBalance = bal.FrozenPayoutBalance.Add(cmd.Amount)
-
-		if err := s.repo.UpdateBalance(ctx, tx, bal); err != nil {
-			return fmt.Errorf("update balance: %w", err)
+		// P0 4.5：余额写入统一走 projection（merchant_treasury_ledger 是账本投影），
+		// 不再在出金侧直接改字段，避免与结算结转产生两个写入者。
+		if err := projection.MoveSettledToFrozenTx(ctx, tx, cmd.MerchantID, cmd.FiatCurrency,
+			money.ToMinor(cmd.Amount).Int64()); err != nil {
+			return fmt.Errorf("update balance projection: %w", err)
 		}
 
 		payoutReq, err := s.repo.InsertPayoutRequest(ctx, tx, db.InsertPayoutRequestParams{
@@ -144,6 +162,7 @@ func (s *Service) Freeze(ctx context.Context, cmd FreezeCmd) (FreezeResult, erro
 			AggregateID:     payoutReq.ID.String(),
 			Description:     fmt.Sprintf("Payout freeze %s %s", cmd.Amount.String(), cmd.FiatCurrency),
 			Amount:          cmd.Amount,
+			UpdateBalances:  true,
 			Entries: []ledgerdomain.Entry{
 				{AccountID: settledAccID, Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
 				{AccountID: frozenAccID, Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
@@ -327,6 +346,9 @@ type ReserveHoldResult struct {
 }
 
 func (s *Service) ReserveHold(ctx context.Context, cmd ReserveHoldCmd) (ReserveHoldResult, error) {
+	if err := validateMinorAmount(cmd.Amount); err != nil {
+		return ReserveHoldResult{}, err
+	}
 	existing, err := s.ledgerRepo.GetTransactionByIdempotencyKey(ctx, cmd.IdempotencyKey)
 	if err != nil {
 		return ReserveHoldResult{}, err
@@ -344,9 +366,18 @@ func (s *Service) ReserveHold(ctx context.Context, cmd ReserveHoldCmd) (ReserveH
 			return apperr.ErrNotFound.WithMessage("no treasury ledger")
 		}
 
-		available := bal.SettledBalance.Sub(bal.ReserveBalance).Sub(bal.FrozenPayoutBalance).Sub(bal.DisputeHoldBalance)
+		available := bal.SettledBalance.Sub(bal.FrozenPayoutBalance).Sub(bal.DisputeHoldBalance)
 		if available.LessThan(cmd.Amount) {
 			return apperr.ErrInsufficientBalance.WithMessage("insufficient available for reserve hold")
+		}
+
+		settledAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "SETTLED", cmd.FiatCurrency)
+		if err != nil {
+			return fmt.Errorf("get settled account: %w", err)
+		}
+		reserveAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "RESERVE", cmd.FiatCurrency)
+		if err != nil {
+			return fmt.Errorf("get reserve account: %w", err)
 		}
 
 		_, err = s.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
@@ -356,14 +387,19 @@ func (s *Service) ReserveHold(ctx context.Context, cmd ReserveHoldCmd) (ReserveH
 			AggregateID:     cmd.MerchantID.String(),
 			Description:     fmt.Sprintf("Reserve hold %s %s", cmd.Amount.String(), cmd.FiatCurrency),
 			Amount:          cmd.Amount,
+			UpdateBalances:  true,
+			Entries: []ledgerdomain.Entry{
+				{AccountID: settledAccID, Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
+				{AccountID: reserveAccID, Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
+			},
 		})
 		if err != nil {
 			return err
 		}
 
-		bal.ReserveBalance = bal.ReserveBalance.Add(cmd.Amount)
-		bal.AvailablePayoutBalance = bal.SettledBalance.Sub(bal.ReserveBalance).Sub(bal.FrozenPayoutBalance).Sub(bal.DisputeHoldBalance)
-		return s.repo.UpdateBalance(ctx, tx, bal)
+		// P0 4.5：投影唯一写入口
+		return projection.MoveSettledToReserveTx(ctx, tx, cmd.MerchantID, cmd.FiatCurrency,
+			money.ToMinor(cmd.Amount).Int64())
 	})
 
 	return ReserveHoldResult{}, err
@@ -381,6 +417,9 @@ type ReserveReleaseResult struct {
 }
 
 func (s *Service) ReserveRelease(ctx context.Context, cmd ReserveReleaseCmd) (ReserveReleaseResult, error) {
+	if err := validateMinorAmount(cmd.Amount); err != nil {
+		return ReserveReleaseResult{}, err
+	}
 	existing, err := s.ledgerRepo.GetTransactionByIdempotencyKey(ctx, cmd.IdempotencyKey)
 	if err != nil {
 		return ReserveReleaseResult{}, err
@@ -402,22 +441,35 @@ func (s *Service) ReserveRelease(ctx context.Context, cmd ReserveReleaseCmd) (Re
 			return apperr.ErrInsufficientBalance.WithMessage("reserve balance insufficient for release")
 		}
 
+		settledAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "SETTLED", cmd.FiatCurrency)
+		if err != nil {
+			return fmt.Errorf("get settled account: %w", err)
+		}
+		reserveAccID, err := s.ledgerRepo.GetOrCreateAccount(ctx, tx, cmd.MerchantID, "RESERVE", cmd.FiatCurrency)
+		if err != nil {
+			return fmt.Errorf("get reserve account: %w", err)
+		}
+
 		_, err = s.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 			IdempotencyKey:  cmd.IdempotencyKey,
 			TransactionType: ledgerdomain.TransactionType("RESERVE_RELEASE"),
 			AggregateType:   "merchant",
 			AggregateID:     cmd.MerchantID.String(),
 			Description:     fmt.Sprintf("Reserve release %s %s", cmd.Amount.String(), cmd.FiatCurrency),
-			Amount:          cmd.Amount.Neg(), // 释放是负数
+			Amount:          cmd.Amount,
+			UpdateBalances:  true,
+			Entries: []ledgerdomain.Entry{
+				{AccountID: reserveAccID, Direction: ledgerdomain.DirectionDebit, Amount: cmd.Amount},
+				{AccountID: settledAccID, Direction: ledgerdomain.DirectionCredit, Amount: cmd.Amount},
+			},
 		})
 		if err != nil {
 			return err
 		}
 
-		bal.ReserveBalance = bal.ReserveBalance.Sub(cmd.Amount)
-		bal.SettledBalance = bal.SettledBalance.Add(cmd.Amount)
-		bal.AvailablePayoutBalance = bal.SettledBalance.Sub(bal.ReserveBalance).Sub(bal.FrozenPayoutBalance).Sub(bal.DisputeHoldBalance)
-		return s.repo.UpdateBalance(ctx, tx, bal)
+		// P0 4.5：投影唯一写入口
+		return projection.MoveReserveToSettledTx(ctx, tx, cmd.MerchantID, cmd.FiatCurrency,
+			money.ToMinor(cmd.Amount).Int64())
 	})
 
 	return ReserveReleaseResult{}, err

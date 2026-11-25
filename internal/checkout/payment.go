@@ -5,28 +5,36 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/nexusglobal/mamr/internal/platform/failclosed"
 	"github.com/shopspring/decimal"
 )
 
 var (
-	ErrPaymentFailed  = errors.New("payment: explicit failure")
-	ErrPaymentTimeout = errors.New("payment: timeout")
+	ErrPaymentFailed            = errors.New("payment: explicit failure")
+	ErrPaymentTimeout           = errors.New("payment: timeout")
+	ErrSystemLockdownFailClosed = errors.New("SYSTEM_LOCKDOWN_FAIL_CLOSED")
 )
 
 type PaymentRequest struct {
-	OrderID            string
-	MerchantID         string
-	Amount             decimal.Decimal
-	Currency           string
-	CardNumber         string // 不落库，仅传给 mock 支付网关（local/mock 模式）
-	CardExpiry         string
-	CardCVV            string // 不落库，仅传给 mock 支付网关（local/mock 模式）
-	CardBIN            string // 卡 BIN 用于风控
-	BuyerIP            string // 买家 IP 用于风控
-	PaymentMethodToken string // tokenized payment method（real 模式必须使用）
+	OrderID                string
+	MerchantID             string
+	AcquirerChannelID      uuid.UUID // P0-3: 唯一权威通道 ID，由 SelectChannel 选择并写入 attempt
+	Amount                 decimal.Decimal
+	Currency               string
+	CardNumber             string // 不落库，仅传给 mock 支付网关（local/mock 模式）
+	CardExpiry             string
+	CardCVV                string // 不落库，仅传给 mock 支付网关（local/mock 模式）
+	CardBIN                string // 卡 BIN 用于风控
+	BuyerIP                string // 买家 IP 用于风控
+	PaymentMethodToken     string // tokenized payment method（real 模式必须使用）
+	ProviderIdempotencyKey string // B3: Provider 幂等键，禁止每次重试重新生成
 }
 
 type PaymentResult struct {
+	// TransactionID 渠道侧交易单号（Stripe pi_* / Nxtapay nx_tx_* / Mock txn_*），
+	// 落库到 payment_attempts.provider_transaction_id；不是本系统内部 UUID，
+	// 内部关联一律使用 payment_attempt ID。
 	TransactionID string
 	Status        string
 	ProviderRef   string
@@ -79,6 +87,10 @@ func (m *MockPaymentGateway) scenarioFor(key string) Scenario {
 }
 
 func (m *MockPaymentGateway) Charge(ctx context.Context, req PaymentRequest) (*PaymentResult, error) {
+	if failclosed.IsSystemLockedDown() {
+		return nil, ErrSystemLockdownFailClosed
+	}
+
 	scenario := m.scenarioFor(req.OrderID)
 
 	switch scenario {

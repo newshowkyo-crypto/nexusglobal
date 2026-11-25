@@ -2,7 +2,11 @@ package crypto
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/base64"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -170,24 +174,107 @@ func TestNewMockKMS_Valid(t *testing.T) {
 	assert.NotNil(t, kms)
 }
 
-func TestMockKMS_DEK_Deterministic(t *testing.T) {
+func TestMockKMS_StableDEK_Deterministic(t *testing.T) {
 	kms := testKMS(t)
 	ctx := context.Background()
 
-	dek1, err := kms.DEK(ctx, "tenant_a")
+	dek1, err := kms.StableDEK(ctx, "tenant_a")
 	require.NoError(t, err)
-	dek2, err := kms.DEK(ctx, "tenant_a")
+	dek2, err := kms.StableDEK(ctx, "tenant_a")
 	require.NoError(t, err)
 	assert.Equal(t, dek1, dek2)
 }
 
-func TestMockKMS_DEK_DifferentTenants(t *testing.T) {
+func TestMockKMS_StableDEK_DifferentTenants(t *testing.T) {
 	kms := testKMS(t)
 	ctx := context.Background()
 
-	dek1, err := kms.DEK(ctx, "tenant_a")
+	dek1, err := kms.StableDEK(ctx, "tenant_a")
 	require.NoError(t, err)
-	dek2, err := kms.DEK(ctx, "tenant_b")
+	dek2, err := kms.StableDEK(ctx, "tenant_b")
 	require.NoError(t, err)
 	assert.NotEqual(t, dek1, dek2)
+}
+
+// --- SEC-001 P0 证据测试（envelope encryption）---
+
+func TestCrypto_EnvelopeRoundTrip_CrossInstance(t *testing.T) {
+	// 模拟跨进程：两个独立 Encryptor 实例（共享同一 KMS 后端）。
+	kms := testKMS(t)
+	enc1 := NewEncryptor(kms)
+	enc2 := NewEncryptor(kms)
+	ctx := context.Background()
+	meta := testMeta()
+
+	ct, err := enc1.Encrypt(ctx, []byte("cross-process-secret"), meta)
+	require.NoError(t, err)
+	require.True(t, hasEnvelopeMagic(ct), "new ciphertext must use envelope v2 format")
+
+	got, err := enc2.Decrypt(ctx, ct, meta)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("cross-process-secret"), got)
+}
+
+func TestCrypto_LegacyV1Fallback_MockKMS(t *testing.T) {
+	// 旧 v1 原始密文（nonce||ct + 确定性派生 DEK）在 MockKMS 下仍可解密。
+	kms := testKMS(t)
+	enc := NewEncryptor(kms)
+	ctx := context.Background()
+	meta := testMeta()
+
+	// 构造 legacy v1 密文：StableDEK 派生 + GCM，无信封头。
+	dek, err := kms.StableDEK(ctx, meta.TenantID)
+	require.NoError(t, err)
+	block, err := aes.NewCipher(dek)
+	require.NoError(t, err)
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+	nonce := make([]byte, gcm.NonceSize())
+	_, err = io.ReadFull(rand.Reader, nonce)
+	require.NoError(t, err)
+	legacy := gcm.Seal(nonce, nonce, []byte("legacy-data"), buildAAD(
+		meta.TenantID, meta.RecordID, meta.FieldName, meta.KeyVersion))
+	require.False(t, hasEnvelopeMagic(legacy))
+
+	got, err := enc.Decrypt(ctx, legacy, meta)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("legacy-data"), got)
+}
+
+func TestCrypto_EnvelopeTamperFailClosed(t *testing.T) {
+	kms := testKMS(t)
+	enc := NewEncryptor(kms)
+	ctx := context.Background()
+	meta := testMeta()
+
+	ct, err := enc.Encrypt(ctx, []byte("secret"), meta)
+	require.NoError(t, err)
+
+	// 篡改 wrapped DEK 第一个字节 → unwrap 认证失败 → 报错（不产生错误明文）。
+	bad := append([]byte{}, ct...)
+	bad[6] ^= 0xFF
+	_, err = enc.Decrypt(ctx, bad, meta)
+	assert.Error(t, err)
+
+	// 篡改数据密文最后一个字节（GCM tag）→ open 失败。
+	bad2 := append([]byte{}, ct...)
+	bad2[len(bad2)-1] ^= 0xFF
+	_, err = enc.Decrypt(ctx, bad2, meta)
+	assert.Error(t, err)
+}
+
+func TestCrypto_EnvelopeWrongTenant_CannotUnwrapDEK(t *testing.T) {
+	// wrapped DEK 与 tenant AAD 绑定：换租户解包 DEK 必须失败。
+	kms := testKMS(t)
+	enc := NewEncryptor(kms)
+	ctx := context.Background()
+	meta := testMeta()
+
+	ct, err := enc.Encrypt(ctx, []byte("secret"), meta)
+	require.NoError(t, err)
+
+	wrongTenant := meta
+	wrongTenant.TenantID = "tenant_b"
+	_, err = enc.Decrypt(ctx, ct, wrongTenant)
+	assert.Error(t, err)
 }

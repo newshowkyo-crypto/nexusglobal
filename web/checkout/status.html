@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="{{.Lang}}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    {{if eq .State "active"}}<meta http-equiv="refresh" content="5">{{end}}
+    <title>{{.Title}}</title>
+    <style>
+        :root {
+            --bg: #f5f6f8;
+            --card: #ffffff;
+            --text: #1a1f2e;
+            --muted: #6b7280;
+            --border: #e5e7eb;
+            --active: #2563eb;
+            --success: #059669;
+            --declined: #dc2626;
+            --expired: #92400e;
+            --used: #6b7280;
+            --unknown: #6b7280;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+        .status-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            max-width: 420px;
+            width: 100%;
+            padding: 32px 24px;
+            text-align: center;
+        }
+        .status-icon {
+            width: 56px; height: 56px;
+            border-radius: 50%;
+            margin: 0 auto 16px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 28px;
+            color: #fff;
+        }
+        .state-active   .status-icon { background: var(--active); }
+        .state-success  .status-icon { background: var(--success); }
+        .state-declined .status-icon { background: var(--declined); }
+        .state-expired  .status-icon { background: var(--expired); }
+        .state-used     .status-icon { background: var(--used); }
+        .state-unknown  .status-icon { background: var(--unknown); }
+        .status-title { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+        .status-desc { font-size: 14px; color: var(--muted); margin-bottom: 20px; }
+        .status-meta {
+            display: flex; justify-content: space-between;
+            padding: 12px 0;
+            border-top: 1px solid var(--border);
+            font-size: 14px;
+        }
+        .status-meta .label { color: var(--muted); }
+        .status-meta .value { font-weight: 500; }
+        .status-refresh { font-size: 12px; color: var(--muted); margin-top: 16px; }
+        .brand { margin-top: 24px; font-size: 12px; color: var(--muted); }
+    </style>
+</head>
+<body class="state-{{.State}}">
+    <main class="status-card">
+        <div class="status-icon" aria-hidden="true">{{.Icon}}</div>
+        <h1 class="status-title">{{.Title}}</h1>
+        <p class="status-desc">{{.Description}}</p>
+        {{if .ShowAmount}}
+        <div class="status-meta">
+            <span class="label">{{.AmountLabel}}</span>
+            <span class="value">{{.Currency}} {{.Amount}}</span>
+        </div>
+        {{end}}
+        {{if .MerchantOrderID}}
+        <div class="status-meta">
+            <span class="label">{{if eq .Lang "zh-CN"}}订单编号{{else}}Order{{end}}</span>
+            <span class="value">{{.MerchantOrderID}}</span>
+        </div>
+        {{end}}
+        {{if eq .State "active"}}<p class="status-refresh">{{if eq .Lang "zh-CN"}}每隔 5 秒自动更新付款状态。{{else}}Page refreshes automatically every 5 seconds.{{end}}</p>{{end}}
+        <p class="brand">{{if eq .Lang "zh-CN"}}由 NexusGlobal 提供支付服务{{else}}Powered by NexusGlobal{{end}}</p>
+    </main>
+</body>
+</html>

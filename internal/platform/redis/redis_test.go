@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -17,6 +18,14 @@ func setupTestRedis(t *testing.T) (*Client, func()) {
 	}
 
 	ctx := context.Background()
+	// OPS-007: 外部共享 Redis 优先（TEST_REDIS_ADDR），testcontainers 兜底。
+	if addr := os.Getenv("TEST_REDIS_ADDR"); addr != "" {
+		client := NewClient(addr)
+		if err := client.Ping(ctx); err != nil {
+			t.Fatalf("ping external TEST_REDIS_ADDR: %v", err)
+		}
+		return client, func() { _ = client.Close() }
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "redis:7",

@@ -15,14 +15,25 @@ import (
 func TestAdminAuth_ValidToken(t *testing.T) {
 	secret := "test-secret"
 	handler := AdminAuth(secret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		subject := GetSubject(r.Context())
-		w.Write([]byte("subject:" + subject))
+		// 收紧后应通过 AdminIdentity 获取身份
+		identity, ok := GetAdminIdentity(r.Context())
+		if !ok {
+			t.Error("AdminIdentity not found in context")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte("subject:" + identity.Subject + ",role:" + identity.Role))
 	}))
 
+	// 收紧后 token 必须含 iss/aud/role/tenant_id（ADM-001：tenant 必填）
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":      "admin-123",
-		"username": "admin",
-		"exp":      time.Now().Add(time.Hour).Unix(),
+		"sub":       "admin-123",
+		"username":  "admin",
+		"iss":       AdminIssuerExpected,
+		"aud":       AdminAudienceExpected,
+		"role":      AdminRoleSecurityAdmin,
+		"tenant_id": "11111111-1111-1111-1111-111111111111",
+		"exp":       time.Now().Add(time.Hour).Unix(),
 	})
 	tokenStr, err := token.SignedString([]byte(secret))
 	require.NoError(t, err)
@@ -34,7 +45,7 @@ func TestAdminAuth_ValidToken(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "subject:admin-123", rr.Body.String())
+	assert.Equal(t, "subject:admin-123,role:security-admin", rr.Body.String())
 }
 
 func TestAdminAuth_MissingToken(t *testing.T) {

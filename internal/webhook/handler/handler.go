@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -79,7 +80,15 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 	payloadHash := idempotency.PayloadHash(payload)
 
 	var payloadMap map[string]interface{}
-	json.Unmarshal(payload, &payloadMap)
+	if err := json.Unmarshal(payload, &payloadMap); err != nil {
+		slog.Warn("webhook: invalid JSON payload",
+			"provider_type", providerType,
+			"provider_id", providerID,
+			"error", err)
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid JSON payload"))
+		return
+	}
+
 	eventType := "webhook"
 	if t, ok := payloadMap["event_type"].(string); ok && t != "" {
 		eventType = t
@@ -129,11 +138,17 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 		var sigValid bool
 		switch domain.SignatureAlgorithm(proxy.SignatureAlgo) {
 		case domain.AlgoRSASHA256:
-			sigValid, _ = domain.VerifyRSA256(payload, signature, secret)
+			var sigErr error
+			sigValid, sigErr = domain.VerifyRSA256(payload, signature, secret)
+			if sigErr != nil {
+				slog.Warn("RSA signature verification error", "err", sigErr)
+			}
 		default:
 			sigValid = domain.VerifyHMACSHA256(payload, signature, secret)
 		}
 		if !sigValid {
+			// SEC-017: 验签失败的事件不得写入原始 payload（即使列名叫 ciphertext，
+			// 旧实现此处存的是明文）。只保留摘要与元数据用于审计追踪。
 			h.repo.InsertIngressEvent(r.Context(), db.InsertIngressEventParams{
 				ProviderType:         providerType,
 				ProviderID:           providerID,
@@ -141,26 +156,29 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 				EventType:            eventType,
 				IdempotencyKey:       idempotencyKey,
 				PayloadHash:          payloadHash,
-				RawPayloadCiphertext: payload,
+				RawPayloadCiphertext: nil,
 				Status:               string(domain.StatusRejected),
 			})
 			writeError(w, apperr.ErrUnauthorized.WithMessage("invalid signature"))
 			return
 		}
 
-		// G9: 加密失败 fail-closed，不落明文
-		encryptedPayload := payload
-		if h.encryptor != nil {
-			enc, encErr := h.encryptor.Encrypt(r.Context(), payload, crypto.Meta{
-				TenantID:  providerType,
-				RecordID:  providerID,
-				FieldName: "raw_payload",
-			})
-			if encErr != nil {
-				writeError(w, apperr.ErrInternal.WithMessage("failed to encrypt payload"))
-				return
-			}
-			encryptedPayload = enc
+		// SEC-017: 加密器缺失时 fail closed——旧实现在此静默落明文
+		//（encryptedPayload := payload），与 G9 注释声明相反。
+		if h.encryptor == nil {
+			slog.Error("webhook: no encryptor configured, refusing to ingest payload (fail closed)",
+				"provider_type", providerType, "provider_id", providerID)
+			writeError(w, apperr.ErrInternal.WithMessage("payload encryption not configured"))
+			return
+		}
+		encryptedPayload, encErr := h.encryptor.Encrypt(r.Context(), payload, crypto.Meta{
+			TenantID:  providerType,
+			RecordID:  providerID,
+			FieldName: "raw_payload",
+		})
+		if encErr != nil {
+			writeError(w, apperr.ErrInternal.WithMessage("failed to encrypt payload"))
+			return
 		}
 
 		ingress, insertErr := h.repo.InsertIngressEvent(r.Context(), db.InsertIngressEventParams{
@@ -179,15 +197,24 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request, provider
 		}
 		ingressID = ingress.ID.String()
 
+		// SEC-018: Publish 失败不得返回 200——那会让 Provider 认为投递成功，
+		// 事件却只躺在 ingress 表里无人消费。返回 500 让 Provider 重试；
+		// ingress 记录已持久化，重试由幂等键去重。
 		if h.producer != nil {
-			h.producer.Publish(r.Context(), streamName, stream.Event{
+			if _, pubErr := h.producer.Publish(r.Context(), streamName, stream.Event{
 				IdempotencyKey: idempotencyKey,
 				ProviderType:   providerType,
 				ProviderID:     providerID,
 				EventType:      eventType,
 				PayloadHash:    payloadHash,
 				IngressID:      ingressID,
-			})
+			}); pubErr != nil {
+				slog.Error("webhook: stream publish failed",
+					"provider_type", providerType, "provider_id", providerID,
+					"ingress_id", ingressID, "err", pubErr)
+				writeError(w, apperr.ErrInternal.WithMessage("failed to enqueue webhook"))
+				return
+			}
 		}
 	} else {
 		// T2-1: repo 为 nil 时必须拒绝，不能跳过验签

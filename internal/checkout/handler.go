@@ -2,6 +2,8 @@ package checkout
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -34,11 +36,14 @@ type CheckoutData struct {
 	Descriptor   MerchantDescriptor `json:"descriptor"`
 	SuccessURL   string             `json:"success_url"`
 	CancelURL    string             `json:"cancel_url"`
+	Nonce        string             `json:"-"`
 }
 
 type TokenValidator interface {
 	Create(ctx context.Context, cmd token.CreateTokenCmd) (*token.Token, error)
 	Redeem(ctx context.Context, cmd token.RedeemTokenCmd) (*token.Token, error)
+	// Peek 校验但不消费（SEC-003：页面查看/validate 只 peek，最终确认才 Redeem）。
+	Peek(ctx context.Context, cmd token.RedeemTokenCmd) (*token.Token, error)
 }
 
 type OrderProvider interface {
@@ -70,6 +75,15 @@ func NewHandler(tokenSvc TokenValidator, orderProvider OrderProvider, paymentGW 
 	}
 }
 
+// generateCheckoutNonce 生成 CSP nonce。
+func generateCheckoutNonce() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "fallback-nonce"
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
 func (h *Handler) ServeCheckoutPage(w http.ResponseWriter, r *http.Request) {
 	tokenValue := r.URL.Query().Get("token")
 	if tokenValue == "" {
@@ -82,7 +96,7 @@ func (h *Handler) ServeCheckoutPage(w http.ResponseWriter, r *http.Request) {
 		origin = r.Header.Get("Referer")
 	}
 
-	tkn, err := h.tokenSvc.Redeem(r.Context(), token.RedeemTokenCmd{
+	tkn, err := h.tokenSvc.Peek(r.Context(), token.RedeemTokenCmd{
 		Value:  tokenValue,
 		Origin: origin,
 	})
@@ -102,6 +116,8 @@ func (h *Handler) ServeCheckoutPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	nonce := generateCheckoutNonce()
+
 	checkoutData := &CheckoutData{
 		OrderID:      tkn.OrderID,
 		MerchantName: "Merchant",
@@ -113,19 +129,24 @@ func (h *Handler) ServeCheckoutPage(w http.ResponseWriter, r *http.Request) {
 			RefundPolicy: "Refunds available within 30 days",
 			SupportEmail: "support@nexusglobal.com",
 		},
+		Nonce: nonce,
 	}
 
 	if h.orderProvider != nil {
 		details, err := h.orderProvider.GetOrderDetails(r.Context(), tkn.OrderID)
 		if err == nil && details != nil {
+			details.Nonce = nonce
 			checkoutData = details
 		}
 	}
 
+	csp := "default-src 'self'; script-src 'self' 'nonce-" + nonce + "'; style-src 'self' 'nonce-" + nonce + "'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 
 	if err := h.tmpl.Execute(w, checkoutData); err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -179,7 +200,7 @@ func (h *Handler) HandleValidateToken(w http.ResponseWriter, r *http.Request) {
 		origin = r.Header.Get("Referer")
 	}
 
-	tkn, err := h.tokenSvc.Redeem(r.Context(), token.RedeemTokenCmd{
+	tkn, err := h.tokenSvc.Peek(r.Context(), token.RedeemTokenCmd{
 		Value:  tokenValue,
 		Origin: origin,
 	})
@@ -235,9 +256,15 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// R3-1: token 校验
+	// R3-1: token 校验 + 原子消费（SEC-003：只有 charge 消费 single-use token；
+	// 页面查看/validate 已改为 Peek 不消费）。Origin 与创建时绑定一致。
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
 	tkn, err := h.tokenSvc.Redeem(r.Context(), token.RedeemTokenCmd{
-		Value: req.Token,
+		Value:  req.Token,
+		Origin: origin,
 	})
 	if err != nil {
 		switch err {
@@ -253,21 +280,28 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// R3-1: 获取订单详情
+	// SEC-004: 订单金额必须成功加载且大于 0——旧实现失败时静默以 USD 0 继续，
+	// 可能产生 0 金额扣款。订单不可用 = 收银台不可支付，必须阻断。
 	amount := decimal.NewFromInt(0)
 	currency := "USD"
 	merchantID := tkn.MerchantID
 
-	if h.orderProvider != nil {
-		details, err := h.orderProvider.GetOrderDetails(r.Context(), tkn.OrderID)
-		if err == nil && details != nil {
-			// 解析金额
-			if parsedAmount, parseErr := decimal.NewFromString(details.Amount); parseErr == nil {
-				amount = parsedAmount
-			}
-			currency = details.Currency
-		}
+	if h.orderProvider == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ORDER_SOURCE_UNAVAILABLE"})
+		return
 	}
+	details, err := h.orderProvider.GetOrderDetails(r.Context(), tkn.OrderID)
+	if err != nil || details == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ORDER_LOAD_FAILED"})
+		return
+	}
+	parsedAmount, parseErr := decimal.NewFromString(details.Amount)
+	if parseErr != nil || parsedAmount.LessThanOrEqual(decimal.Zero) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_ORDER_AMOUNT"})
+		return
+	}
+	amount = parsedAmount
+	currency = details.Currency
 
 	// 风控检查：在调用 acquirer 前检查
 	if h.riskGateway != nil {
@@ -370,6 +404,8 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Channel not found"})
 		case errors.Is(err, ErrChannelDisabled):
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Channel disabled"})
+		case errors.Is(err, ErrSystemLockdownFailClosed):
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "SYSTEM_LOCKDOWN_FAIL_CLOSED"})
 		default:
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Payment error"})
 		}
@@ -401,7 +437,8 @@ func (h *Handler) HandleCharge(w http.ResponseWriter, r *http.Request) {
 		"order_id":       tkn.OrderID,
 		"transaction_id": paymentResult.TransactionID,
 		"status":         paymentResult.Status,
-		"redirect_url":   "/checkout/success",
+		// PAY-002: 跳转商户 allowlist 校验过的 success_url，不再指向固定内部页
+		"redirect_url": details.SuccessURL,
 	})
 }
 

@@ -3,9 +3,11 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/nexusglobal/mamr/internal/acquirer/domain"
@@ -162,8 +164,12 @@ func (r *Repository) ListActiveTenantAcquirerChannels(ctx context.Context, tenan
 // ListAllActiveTenantAcquirerChannels 获取所有活跃通道
 func (r *Repository) ListAllActiveTenantAcquirerChannels(ctx context.Context) ([]domain.TenantAcquirerChannel, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, tenant_id, merchant_id, channel_code, provider_id, channel_config, is_active, version, created_at, updated_at
-		FROM tenant_acquirer_channel WHERE is_active = true`)
+		`SELECT tac.id, tac.tenant_id, tac.merchant_id, tac.channel_code, tac.provider_id,
+		       tac.channel_config, tac.is_active, tac.version, tac.created_at, tac.updated_at,
+		       tac.acquirer_channel_id
+		FROM tenant_acquirer_channel tac
+		LEFT JOIN acquirer_channels ac ON tac.acquirer_channel_id = ac.id
+		WHERE tac.is_active = true`)
 	if err != nil {
 		return nil, err
 	}
@@ -175,13 +181,126 @@ func (r *Repository) ListAllActiveTenantAcquirerChannels(ctx context.Context) ([
 		var configJSON []byte
 		err := rows.Scan(
 			&c.ID, &c.TenantID, &c.MerchantID, &c.ChannelCode, &c.ProviderID,
-			&configJSON, &c.IsActive, &c.Version, &c.CreatedAt, &c.UpdatedAt)
+			&configJSON, &c.IsActive, &c.Version, &c.CreatedAt, &c.UpdatedAt,
+			&c.AcquirerChannelID)
 		if err != nil {
 			return nil, err
 		}
 		if len(configJSON) > 0 {
 			json.Unmarshal(configJSON, &c.ChannelConfig)
 		}
+		channels = append(channels, c)
+	}
+	return channels, nil
+}
+
+// GetMerchantRoutingPolicy 获取商户的权威路由策略。
+func (r *Repository) GetMerchantRoutingPolicy(ctx context.Context, merchantID uuid.UUID) (*domain.MerchantRoutingPolicy, error) {
+	var p domain.MerchantRoutingPolicy
+	err := r.pool.QueryRow(ctx,
+		`SELECT merchant_id, provider_tier, status, version
+         FROM merchant_routing_policy WHERE merchant_id = $1`, merchantID).Scan(
+		&p.MerchantID, &p.ProviderTier, &p.Status, &p.Version)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // 无 policy，由调用方判断 fail-closed
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+// CreateMerchantRoutingPolicy 创建商户路由策略。
+func (r *Repository) CreateMerchantRoutingPolicy(ctx context.Context, p *domain.MerchantRoutingPolicy) error {
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO merchant_routing_policy (merchant_id, provider_tier, status, version)
+         VALUES ($1, $2, $3, 1)`,
+		p.MerchantID, p.ProviderTier, p.Status)
+	return err
+}
+
+// UpdateMerchantRoutingPolicy 更新商户路由策略。
+func (r *Repository) UpdateMerchantRoutingPolicy(ctx context.Context, p *domain.MerchantRoutingPolicy) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE merchant_routing_policy SET provider_tier = $2, status = $3, version = version + 1, updated_at = now()
+         WHERE merchant_id = $1`,
+		p.MerchantID, p.ProviderTier, p.Status)
+	return err
+}
+
+// ListMerchantRoutingPolicies 列出所有商户路由策略。
+func (r *Repository) ListMerchantRoutingPolicies(ctx context.Context) ([]domain.MerchantRoutingPolicy, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT merchant_id, provider_tier, status, version FROM merchant_routing_policy ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var policies []domain.MerchantRoutingPolicy
+	for rows.Next() {
+		var p domain.MerchantRoutingPolicy
+		err := rows.Scan(&p.MerchantID, &p.ProviderTier, &p.Status, &p.Version)
+		if err != nil {
+			return nil, err
+		}
+		policies = append(policies, p)
+	}
+	return policies, nil
+}
+
+// ListActiveChannelsByMerchantAndCurrency 获取指定商户、支持指定币种的活跃通道（P0-B2）。
+// 用于通道路由：只能从属于当前 merchant 的通道中选择，并校验币种支持。
+// currency 为空字符串时跳过币种校验。
+// INNER JOIN acquirer_channels 获取 provider_tier 和 acquirer_channel_id，并过滤 ac.status='ACTIVE'。
+func (r *Repository) ListActiveChannelsByMerchantAndCurrency(ctx context.Context, merchantID uuid.UUID, currency string) ([]domain.TenantAcquirerChannel, error) {
+	var rows pgx.Rows
+	var err error
+	if currency == "" {
+		rows, err = r.pool.Query(ctx,
+			`SELECT tac.id, tac.tenant_id, tac.merchant_id, tac.channel_code, tac.provider_id,
+			        tac.channel_config, tac.is_active, tac.version, tac.created_at, tac.updated_at,
+			        ac.provider_tier, ac.id
+			 FROM tenant_acquirer_channel tac
+			 INNER JOIN acquirer_channels ac ON tac.acquirer_channel_id = ac.id
+			 WHERE tac.merchant_id = $1 AND tac.is_active = true AND ac.status = 'ACTIVE'`,
+			merchantID)
+	} else {
+		// JSONB ? 操作符：检查 currencies 数组是否包含指定币种
+		rows, err = r.pool.Query(ctx,
+			`SELECT tac.id, tac.tenant_id, tac.merchant_id, tac.channel_code, tac.provider_id,
+			        tac.channel_config, tac.is_active, tac.version, tac.created_at, tac.updated_at,
+			        ac.provider_tier, ac.id
+			 FROM tenant_acquirer_channel tac
+			 INNER JOIN acquirer_channels ac ON tac.acquirer_channel_id = ac.id
+			 WHERE tac.merchant_id = $1 AND tac.is_active = true AND ac.status = 'ACTIVE' AND ($2 = '' OR tac.currencies ? $2)`,
+			merchantID, currency)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []domain.TenantAcquirerChannel
+	for rows.Next() {
+		var c domain.TenantAcquirerChannel
+		var configJSON []byte
+		var providerTier *string
+		var acquirerChannelID *uuid.UUID
+		err := rows.Scan(
+			&c.ID, &c.TenantID, &c.MerchantID, &c.ChannelCode, &c.ProviderID,
+			&configJSON, &c.IsActive, &c.Version, &c.CreatedAt, &c.UpdatedAt,
+			&providerTier, &acquirerChannelID)
+		if err != nil {
+			return nil, err
+		}
+		if len(configJSON) > 0 {
+			json.Unmarshal(configJSON, &c.ChannelConfig)
+		}
+		if providerTier != nil {
+			c.ProviderTier = domain.ProviderTier(*providerTier)
+		}
+		c.AcquirerChannelID = acquirerChannelID
 		channels = append(channels, c)
 	}
 	return channels, nil
@@ -444,4 +563,28 @@ func (r *Repository) GetAcquirerChannelByID(ctx context.Context, id uuid.UUID) (
 		json.Unmarshal(routingConfigJSON, &c.RoutingConfig)
 	}
 	return &c, nil
+}
+
+// SyncRuntimeChannelStatus 在同一事务中同步更新绑定 runtime channel 的 is_active 和 version。
+func (r *Repository) SyncRuntimeChannelStatus(ctx context.Context, tx pgx.Tx, acquirerChannelID uuid.UUID, isActive bool) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE tenant_acquirer_channel
+         SET is_active = $1, version = version + 1, updated_at = now()
+         WHERE acquirer_channel_id = $2`,
+		isActive, acquirerChannelID)
+	return err
+}
+
+// GetRuntimeChannelIDByAcquirerChannelID 查询绑定到 acquirer_channel 的 runtime channel ID。
+func (r *Repository) GetRuntimeChannelIDByAcquirerChannelID(ctx context.Context, acquirerChannelID uuid.UUID) (*uuid.UUID, error) {
+	var id uuid.UUID
+	err := r.pool.QueryRow(ctx,
+		`SELECT id FROM tenant_acquirer_channel WHERE acquirer_channel_id = $1`, acquirerChannelID).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &id, nil
 }

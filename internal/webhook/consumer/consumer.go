@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,7 +16,9 @@ import (
 	payoutrepo "github.com/nexusglobal/mamr/internal/payout/repository"
 	"github.com/nexusglobal/mamr/internal/platform/crypto"
 	"github.com/nexusglobal/mamr/internal/platform/idempotency"
+	"github.com/nexusglobal/mamr/internal/platform/money"
 	"github.com/nexusglobal/mamr/internal/platform/stream"
+	"github.com/nexusglobal/mamr/internal/settlement/projection"
 	webhookrepo "github.com/nexusglobal/mamr/internal/webhook/repository"
 )
 
@@ -192,13 +195,15 @@ func (c *Consumer) handleMessage(ctx context.Context, msg redis.XMessage) error 
 		}
 	}
 
-	payload, err := c.loadPayload(ctx, ingressID)
+	payload, err := c.loadPayload(ctx, ingressID, eventType)
 	if err != nil {
+		// 加载/解密/解析/必填字段验证失败：不 ACK，交给重试；超过 MaxDeliveries 后进入 DLQ。
+		c.logger.Warn("webhook payload load failed, will retry/dlq",
+			"ingress_id", ingressID, "event_type", eventType, "err_category", categorizeError(err))
 		return fmt.Errorf("load payload: %w", err)
 	}
 	if payload == nil {
-		c.logger.Warn("no payload found, skipping", "ingress_id", ingressID)
-		return nil
+		return fmt.Errorf("webhook payload nil for ingress %s", ingressID)
 	}
 
 	var result error
@@ -214,9 +219,10 @@ func (c *Consumer) handleMessage(ctx context.Context, msg redis.XMessage) error 
 	case "payout_confirmed", "lp_callback":
 		result = c.handlePayoutConfirmed(ctx, payload)
 	default:
-		c.logger.Warn("unknown event type, skipping",
+		// 未知事件类型：不能 ACK，进入重试/DLQ，避免静默丢失。
+		c.logger.Warn("unknown event type, will retry/dlq",
 			"event_type", eventType, "msg_id", msg.ID)
-		return nil
+		return fmt.Errorf("unknown webhook event type %q for ingress %s", eventType, ingressID)
 	}
 
 	// T2-3: 处理成功后设置 L1 缓存
@@ -236,9 +242,12 @@ type webhookPayload struct {
 	PayoutRequestID string `json:"payout_request_id"`
 }
 
-func (c *Consumer) loadPayload(ctx context.Context, ingressID string) (*webhookPayload, error) {
-	if c.webhookRepo == nil || ingressID == "" {
-		return nil, nil
+func (c *Consumer) loadPayload(ctx context.Context, ingressID string, eventType string) (*webhookPayload, error) {
+	if c.webhookRepo == nil {
+		return nil, fmt.Errorf("webhook repository not configured")
+	}
+	if ingressID == "" {
+		return nil, fmt.Errorf("missing ingress_id in message")
 	}
 
 	id, err := uuid.Parse(ingressID)
@@ -251,26 +260,59 @@ func (c *Consumer) loadPayload(ctx context.Context, ingressID string) (*webhookP
 		return nil, fmt.Errorf("get ingress event: %w", err)
 	}
 	if ingress == nil {
-		return nil, nil
+		return nil, fmt.Errorf("ingress event %s not found", ingressID)
 	}
 
 	rawPayload := ingress.RawPayloadCiphertext
-	if c.encryptor != nil && len(rawPayload) > 0 {
+	if len(rawPayload) > 0 {
+		if c.encryptor == nil {
+			return nil, fmt.Errorf("ingress %s has ciphertext but encryptor is not configured", ingressID)
+		}
 		decrypted, decErr := c.encryptor.Decrypt(ctx, rawPayload, crypto.Meta{
 			TenantID:  ingress.ProviderType,
 			RecordID:  ingress.ProviderID,
 			FieldName: "raw_payload",
 		})
-		if decErr == nil {
-			rawPayload = decrypted
+		if decErr != nil {
+			return nil, fmt.Errorf("decrypt ingress payload: %w", decErr)
 		}
+		rawPayload = decrypted
+	} else {
+		return nil, fmt.Errorf("ingress %s has empty ciphertext", ingressID)
 	}
 
 	var payload webhookPayload
 	if err := json.Unmarshal(rawPayload, &payload); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("unmarshal payload for ingress %s: %w", ingressID, err)
 	}
+
+	// P0-6: 按事件类型验证必填字段
+	if err := validatePayload(eventType, &payload); err != nil {
+		return nil, fmt.Errorf("ingress %s: %w", ingressID, err)
+	}
+
 	return &payload, nil
+}
+
+// validatePayload 按事件类型验证必填字段，可在测试中独立调用。
+func validatePayload(eventType string, payload *webhookPayload) error {
+	if payload.MerchantID == "" {
+		return fmt.Errorf("missing required field merchant_id")
+	}
+	switch eventType {
+	case "captured", "settled", "refund", "dispute":
+		if payload.Amount == "" {
+			return fmt.Errorf("missing required field amount for %s event", eventType)
+		}
+		if payload.Currency == "" {
+			return fmt.Errorf("missing required field currency for %s event", eventType)
+		}
+	case "payout_confirmed", "lp_callback":
+		if payload.PayoutRequestID == "" {
+			return fmt.Errorf("missing required field payout_request_id for %s event", eventType)
+		}
+	}
+	return nil
 }
 
 func (c *Consumer) handleCaptured(ctx context.Context, idempotencyKey string, payload *webhookPayload) error {
@@ -389,6 +431,16 @@ func (c *Consumer) postFinancialEntry(
 		return fmt.Errorf("no treasury ledger for merchant %s currency %s", merchantID, currency)
 	}
 
+	// SEC-005: 交易必须携带成对平衡分录（RED-13），禁止无分录入账。
+	debitAccID, err := c.ledgerRepo.GetOrCreateAccount(ctx, tx, merchantID, debitAccountType, currency)
+	if err != nil {
+		return fmt.Errorf("get/create debit account %s: %w", debitAccountType, err)
+	}
+	creditAccID, err := c.ledgerRepo.GetOrCreateAccount(ctx, tx, merchantID, creditAccountType, currency)
+	if err != nil {
+		return fmt.Errorf("get/create credit account %s: %w", creditAccountType, err)
+	}
+
 	_, err = c.ledgerRepo.PostTransaction(ctx, tx, ledgerdomain.Transaction{
 		IdempotencyKey:  idempotencyKey,
 		TransactionType: ledgerdomain.TransactionType(eventType),
@@ -396,31 +448,31 @@ func (c *Consumer) postFinancialEntry(
 		AggregateID:     merchantID.String(),
 		Description:     fmt.Sprintf("Webhook %s %s %s", eventType, amount.String(), currency),
 		Amount:          amount,
+		Entries: []ledgerdomain.Entry{
+			{AccountID: debitAccID, Direction: ledgerdomain.DirectionDebit, Amount: amount},
+			{AccountID: creditAccID, Direction: ledgerdomain.DirectionCredit, Amount: amount},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("ledger post: %w", err)
 	}
 
+	// P0 4.5：投影唯一写入口
+	minor := money.ToMinor(amount).Int64()
 	switch eventType {
 	case "CAPTURED":
-		bal.PendingBalance = bal.PendingBalance.Add(amount)
+		err = projection.AddPendingTx(ctx, tx, merchantID, currency, minor)
 	case "SETTLED":
-		bal.PendingBalance = bal.PendingBalance.Sub(amount)
-		bal.SettledBalance = bal.SettledBalance.Add(amount)
+		err = projection.MovePendingToSettledTx(ctx, tx, merchantID, currency, minor)
 	case "REFUND":
-		bal.SettledBalance = bal.SettledBalance.Sub(amount)
+		err = projection.RemoveSettledTx(ctx, tx, merchantID, currency, minor)
 	case "DISPUTE":
-		bal.SettledBalance = bal.SettledBalance.Sub(amount)
-		bal.DisputeHoldBalance = bal.DisputeHoldBalance.Add(amount)
+		err = projection.MoveSettledToDisputeTx(ctx, tx, merchantID, currency, minor)
+	default:
+		err = fmt.Errorf("unknown financial event type %q", eventType)
 	}
-
-	bal.AvailablePayoutBalance = bal.SettledBalance.
-		Sub(bal.ReserveBalance).
-		Sub(bal.FrozenPayoutBalance).
-		Sub(bal.DisputeHoldBalance)
-
-	if err := c.payoutRepo.UpdateBalance(ctx, tx, bal); err != nil {
-		return fmt.Errorf("update balance: %w", err)
+	if err != nil {
+		return fmt.Errorf("update projection: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -442,4 +494,36 @@ func PayloadHash(data []byte) string {
 
 func WebhookIdempotencyKey(providerType, providerID, providerEventID, eventType string) string {
 	return idempotency.WebhookIdempotencyKey(providerType, providerID, providerEventID, eventType)
+}
+
+// categorizeError 将错误映射为安全分类，避免日志泄露密文、明文 payload 或敏感细节。
+func categorizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "encryptor is not configured") ||
+		strings.Contains(msg, "repository not configured") ||
+		strings.Contains(msg, "no confirmer configured"):
+		return "config_error"
+	case strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "missing ingress_id"):
+		return "not_found"
+	case strings.Contains(msg, "decrypt") ||
+		strings.Contains(msg, "ciphertext"):
+		return "decrypt_error"
+	case strings.Contains(msg, "unmarshal") ||
+		strings.Contains(msg, "invalid json") ||
+		strings.Contains(msg, "JSON"):
+		return "parse_error"
+	case strings.Contains(msg, "missing required field") ||
+		strings.Contains(msg, "invalid merchant_id") ||
+		strings.Contains(msg, "invalid amount") ||
+		strings.Contains(msg, "invalid payout_request_id") ||
+		strings.Contains(msg, "amount must be positive"):
+		return "validation_error"
+	default:
+		return "internal_error"
+	}
 }

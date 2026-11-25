@@ -63,6 +63,19 @@ func (m *mockRepository) UpdateTransferStatus(ctx context.Context, id uuid.UUID,
 	return args.Error(0)
 }
 
+func (m *mockRepository) UpdateSweepTransferBankRef(ctx context.Context, id uuid.UUID, bankRef string) error {
+	args := m.Called(ctx, id, bankRef)
+	return args.Error(0)
+}
+
+func (m *mockRepository) InsertOutboxEvent(ctx context.Context, aggregateType string, aggregateID uuid.UUID, eventType, payload, idempotencyKey string) (uuid.UUID, error) {
+	args := m.Called(ctx, aggregateType, aggregateID, eventType, payload, idempotencyKey)
+	if args.Get(0) == nil {
+		return uuid.Nil, args.Error(1)
+	}
+	return args.Get(0).(uuid.UUID), args.Error(1)
+}
+
 func (m *mockRepository) CountDailySweeps(ctx context.Context, ruleID uuid.UUID, since pgtype.Timestamptz) (int64, error) {
 	args := m.Called(ctx, ruleID, since)
 	return args.Get(0).(int64), args.Error(1)
@@ -176,6 +189,7 @@ func TestSubmit_Success(t *testing.T) {
 	bankCli.On("SubmitTransfer", mock.Anything, mock.Anything).Return(bank.TransferResult{
 		BankRef: "bank-ref-123",
 	}, nil)
+	repo.On("UpdateSweepTransferBankRef", ctx, transferID, "bank-ref-123").Return(nil)
 	repo.On("UpdateTransferStatus", ctx, transferID, "Submitted", int32(1)).Return(nil)
 
 	err := svc.Submit(ctx, transferID)
@@ -221,25 +235,32 @@ func TestSubmit_InvalidStatus(t *testing.T) {
 	assert.True(t, errors.As(err, &apperr.ErrIllegalTransition))
 }
 
-func TestReconcile_Success(t *testing.T) {
+func TestReconcile_EnqueuesCommand(t *testing.T) {
+	// SEC-013: Reconcile 不再直接 Confirmed，而是写持久 Outbox 命令。
 	ctx := context.Background()
 	repo := new(mockRepository)
 	bankCli := new(mockBankClient)
 	txm := &postgres.TxManager{}
 
-	svc := New(repo, bankCli, txm, nil, nil, nil)
+	svc := New(repo, bankCli, txm, nil, nil, slog.Default())
 
 	transferID := uuid.New()
+	commandID := uuid.New()
 	repo.On("GetTransfer", ctx, transferID).Return(&db.SweepTransfer{
 		ID:      transferID,
 		Status:  "Submitted",
+		BankRef: "bank-ref-123",
 		Version: 1,
 	}, nil)
-	repo.On("UpdateTransferStatus", ctx, transferID, "Confirmed", int32(1)).Return(nil)
+	repo.On("InsertOutboxEvent", ctx, "sweep_transfer", transferID, "SWEEP_RECONCILE_REQUESTED",
+		mock.Anything, "sweep_reconcile:"+transferID.String()).Return(commandID, nil)
 
-	err := svc.Reconcile(ctx, transferID, "bank-ref-123")
+	result, err := svc.Reconcile(ctx, transferID, "")
 
 	require.NoError(t, err)
+	assert.Equal(t, commandID.String(), result.CommandID)
+	assert.Equal(t, "ReconcileRequested", result.Status)
+	repo.AssertNotCalled(t, "UpdateTransferStatus", ctx, transferID, "Confirmed", int32(1))
 }
 
 func TestReconcile_AlreadyConfirmed(t *testing.T) {
@@ -257,9 +278,10 @@ func TestReconcile_AlreadyConfirmed(t *testing.T) {
 		Version: 1,
 	}, nil)
 
-	err := svc.Reconcile(ctx, transferID, "bank-ref-123")
+	_, err := svc.Reconcile(ctx, transferID, "bank-ref-123")
 
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.True(t, errors.As(err, &apperr.ErrIllegalTransition))
 }
 
 func TestReconcile_InvalidStatus(t *testing.T) {
@@ -277,10 +299,32 @@ func TestReconcile_InvalidStatus(t *testing.T) {
 		Version: 1,
 	}, nil)
 
-	err := svc.Reconcile(ctx, transferID, "bank-ref-123")
+	_, err := svc.Reconcile(ctx, transferID, "bank-ref-123")
 
 	require.Error(t, err)
 	assert.True(t, errors.As(err, &apperr.ErrIllegalTransition))
+}
+
+func TestReconcile_MissingBankRef(t *testing.T) {
+	// SEC-013: 无 bank_ref 时拒绝受理，不得伪造对账。
+	ctx := context.Background()
+	repo := new(mockRepository)
+	bankCli := new(mockBankClient)
+	txm := &postgres.TxManager{}
+
+	svc := New(repo, bankCli, txm, nil, nil, nil)
+
+	transferID := uuid.New()
+	repo.On("GetTransfer", ctx, transferID).Return(&db.SweepTransfer{
+		ID:      transferID,
+		Status:  "Submitted",
+		BankRef: "",
+		Version: 1,
+	}, nil)
+
+	_, err := svc.Reconcile(ctx, transferID, "")
+
+	require.Error(t, err)
 }
 
 // T3-3: 测试净额为0时不SUBMIT

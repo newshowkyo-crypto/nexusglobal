@@ -3,11 +3,13 @@ package carding
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/nexusglobal/mamr/internal/platform/apperr"
+	"github.com/nexusglobal/mamr/internal/platform/httpx"
 	"github.com/nexusglobal/mamr/internal/risk/carding/domain"
 )
 
@@ -21,6 +23,13 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// SetRuleStore 注入表化规则存储（P6）。
+func (h *Handler) SetRuleStore(store *RuleStore) {
+	if h.svc != nil {
+		h.svc.SetRuleStore(store)
+	}
+}
+
 // EvaluateRequest 风控评估请求
 type EvaluateRequest struct {
 	TenantID   string `json:"tenant_id"`
@@ -29,6 +38,8 @@ type EvaluateRequest struct {
 	BuyerIP    string `json:"buyer_ip"`
 	CardBIN    string `json:"card_bin"` // 只接收 BIN（6-8位），不接收完整卡号
 	DeviceID   string `json:"device_id"`
+	ChannelID  string `json:"channel_id"` // P6: 池化通道
+	SiteID     string `json:"site_id"`    // P6: 站点
 }
 
 // EvaluateResponse 风控评估响应
@@ -52,6 +63,8 @@ type EventResponse struct {
 	BuyerIPHash  string `json:"buyer_ip_hash"`
 	CardBINHash  string `json:"card_bin_hash,omitempty"`
 	DeviceHash   string `json:"device_hash,omitempty"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	SiteID       string `json:"site_id,omitempty"`
 	WindowType   string `json:"window_type"`
 	ThresholdHit int    `json:"threshold_hit"`
 	CurrentCount int    `json:"current_count"`
@@ -85,6 +98,16 @@ func (h *Handler) Evaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	channelID := uuid.Nil
+	if req.ChannelID != "" {
+		parsed, perr := uuid.Parse(req.ChannelID)
+		if perr != nil {
+			writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid channel_id"))
+			return
+		}
+		channelID = parsed
+	}
+
 	result, err := h.svc.Evaluate(r.Context(), domain.CheckRequest{
 		TenantID:   tenantID,
 		MerchantID: merchantID,
@@ -92,6 +115,8 @@ func (h *Handler) Evaluate(w http.ResponseWriter, r *http.Request) {
 		BuyerIP:    req.BuyerIP,
 		CardBIN:    req.CardBIN,
 		DeviceID:   req.DeviceID,
+		ChannelID:  channelID,
+		SiteID:     req.SiteID,
 	})
 	if err != nil {
 		writeAppErr(w, err)
@@ -120,6 +145,13 @@ func (h *Handler) Evaluate(w http.ResponseWriter, r *http.Request) {
 // GET /admin/risk/events?tenant_id=xxx&limit=50
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	tenantIDStr := r.URL.Query().Get("tenant_id")
+	if identity, ok := httpx.GetAdminIdentity(r.Context()); ok && identity.TenantID != "" {
+		if tenantIDStr != "" && tenantIDStr != identity.TenantID {
+			writeError(w, apperr.ErrForbidden.WithMessage("tenant scope mismatch"))
+			return
+		}
+		tenantIDStr = identity.TenantID
+	}
 	if tenantIDStr == "" {
 		writeError(w, apperr.ErrInvalidArgument.WithMessage("tenant_id required"))
 		return
@@ -157,6 +189,8 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 			BuyerIPHash:  e.BuyerIPHash,
 			CardBINHash:  e.CardBINHash,
 			DeviceHash:   e.DeviceHash,
+			ChannelID:    uuidOrEmpty(e.ChannelID),
+			SiteID:       e.SiteID,
 			WindowType:   string(e.WindowType),
 			ThresholdHit: e.ThresholdHit,
 			CurrentCount: e.CurrentCount,
@@ -193,6 +227,8 @@ func (h *Handler) GetEvent(w http.ResponseWriter, r *http.Request) {
 		BuyerIPHash:  event.BuyerIPHash,
 		CardBINHash:  event.CardBINHash,
 		DeviceHash:   event.DeviceHash,
+		ChannelID:    uuidOrEmpty(event.ChannelID),
+		SiteID:       event.SiteID,
 		WindowType:   string(event.WindowType),
 		ThresholdHit: event.ThresholdHit,
 		CurrentCount: event.CurrentCount,
@@ -282,6 +318,68 @@ func (h *Handler) RecordSuccess(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "success_recorded"})
+}
+
+// ListRules 查询风控规则（P6）
+// GET /admin/api/v3/risk/rules?scope=&scope_id=
+func (h *Handler) ListRules(w http.ResponseWriter, r *http.Request) {
+	rules, err := h.svc.ListRules(r.Context(), r.URL.Query().Get("scope"), r.URL.Query().Get("scope_id"))
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
+}
+
+// UpsertRule 写入风控规则（P6）
+// POST /admin/api/v3/risk/rules
+func (h *Handler) UpsertRule(w http.ResponseWriter, r *http.Request) {
+	var rule domain.Rule
+	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid request body"))
+		return
+	}
+	if rule.Dimension == "" {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("dimension is required"))
+		return
+	}
+	if rule.Scope != "" && rule.Scope != domain.ScopeGlobal && rule.ScopeID == "" {
+		writeError(w, apperr.ErrInvalidArgument.WithMessage("scope_id is required for non-global scope"))
+		return
+	}
+	id, err := h.svc.UpsertRule(r.Context(), rule)
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id})
+}
+
+// Alerts 池化风险检测（P6）
+// GET /admin/api/v3/risk/alerts?window=1h
+func (h *Handler) Alerts(w http.ResponseWriter, r *http.Request) {
+	window := time.Hour
+	if v := r.URL.Query().Get("window"); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			writeError(w, apperr.ErrInvalidArgument.WithMessage("invalid window, e.g. 30m or 1h"))
+			return
+		}
+		window = parsed
+	}
+	alerts, err := h.svc.ScanAlerts(r.Context(), window)
+	if err != nil {
+		writeAppErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"alerts": alerts, "count": len(alerts)})
+}
+
+func uuidOrEmpty(id uuid.UUID) string {
+	if id == uuid.Nil {
+		return ""
+	}
+	return id.String()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

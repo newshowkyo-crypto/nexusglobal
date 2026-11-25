@@ -2,12 +2,14 @@ package carding
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -21,6 +23,12 @@ func setupTestRedis(t *testing.T) (*redis.Client, func()) {
 	}
 
 	ctx := context.Background()
+	// OPS-007: 外部共享 Redis 优先（TEST_REDIS_ADDR），testcontainers 兜底。
+	if addr := os.Getenv("TEST_REDIS_ADDR"); addr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: addr})
+		require.NoError(t, rdb.Ping(ctx).Err(), "ping external TEST_REDIS_ADDR")
+		return rdb, func() { _ = rdb.Close() }
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "redis:7-alpine",

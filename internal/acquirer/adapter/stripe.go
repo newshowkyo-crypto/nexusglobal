@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -87,7 +88,8 @@ func (c *StripeClient) Authorize(ctx context.Context, req domain.AuthorizeReques
 		"payment_method":      req.PaymentMethodToken,
 		"capture_method":      "manual", // 先授权，后捕获
 		"confirmation_method": "automatic",
-		"return_url":          "", // 3DS 完成后跳转 URL
+		"confirm":             "true", // 不 confirm 只会停在 requires_confirmation，后续 Capture 必然失败
+		"return_url":          "",     // 3DS 完成后跳转 URL
 	}
 
 	if req.IdempotencyKey != "" {
@@ -120,7 +122,7 @@ func (c *StripeClient) Authorize(ctx context.Context, req domain.AuthorizeReques
 	switch piResp.Status {
 	case "requires_action", "requires_source_action":
 		return &domain.AuthorizeResult{
-			TransactionID:    mustParseUUID(piResp.ID),
+			TransactionID:    uuid.New(),
 			ProviderRef:      piResp.ID,
 			Status:           domain.PaymentStatusPending,
 			AuthorizedAmount: req.Amount,
@@ -128,7 +130,7 @@ func (c *StripeClient) Authorize(ctx context.Context, req domain.AuthorizeReques
 
 	case "requires_confirmation", "requires_payment_method":
 		return &domain.AuthorizeResult{
-			TransactionID:    mustParseUUID(piResp.ID),
+			TransactionID:    uuid.New(),
 			ProviderRef:      piResp.ID,
 			Status:           domain.PaymentStatusAuthorized,
 			AuthorizedAmount: req.Amount,
@@ -136,7 +138,7 @@ func (c *StripeClient) Authorize(ctx context.Context, req domain.AuthorizeReques
 
 	case "requires_capture":
 		return &domain.AuthorizeResult{
-			TransactionID:    mustParseUUID(piResp.ID),
+			TransactionID:    uuid.New(),
 			ProviderRef:      piResp.ID,
 			Status:           domain.PaymentStatusAuthorized,
 			AuthorizedAmount: req.Amount,
@@ -289,14 +291,11 @@ func (c *StripeClient) get(ctx context.Context, path string) ([]byte, int, error
 func (c *StripeClient) doRequest(ctx context.Context, method, path string, params map[string]string) ([]byte, int, error) {
 	var body io.Reader = http.NoBody
 	if method == http.MethodPost && params != nil {
-		form := ""
+		values := url.Values{}
 		for k, v := range params {
-			if form != "" {
-				form += "&"
-			}
-			form += fmt.Sprintf("%s=%s", k, v)
+			values.Set(k, v)
 		}
-		body = bytes.NewBufferString(form)
+		body = bytes.NewBufferString(values.Encode())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
@@ -401,15 +400,6 @@ func amountToCents(amount decimal.Decimal) int {
 // centsToDecimal 将分转换为 decimal
 func centsToDecimal(cents int64) decimal.Decimal {
 	return decimal.NewFromInt(cents).Div(decimal.NewFromInt(100))
-}
-
-// mustParseUUID 解析 UUID，失败 panic
-func mustParseUUID(s string) uuid.UUID {
-	id, err := uuid.Parse(s)
-	if err != nil {
-		return uuid.Nil
-	}
-	return id
 }
 
 // verifyStripeSignature 验证 Stripe webhook 签名

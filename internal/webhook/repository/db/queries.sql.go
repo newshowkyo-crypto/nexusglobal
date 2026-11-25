@@ -109,7 +109,7 @@ type InsertIngressEventParams struct {
 	EventType            string `json:"event_type"`
 	IdempotencyKey       string `json:"idempotency_key"`
 	PayloadHash          string `json:"payload_hash"`
-	RawPayloadCiphertext []byte `json:"raw_payload_ciphertext"`
+	RawPayloadCiphertext []byte `json:"-"` // 敏感字段：禁止JSON序列化
 	Status               string `json:"status"`
 }
 

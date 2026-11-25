@@ -119,8 +119,8 @@ type InsertMAEConfigParams struct {
 	Jurisdiction             string    `json:"jurisdiction"`
 	SupportedCurrencies      []byte    `json:"supported_currencies"`
 	ApiBaseUrl               string    `json:"api_base_url"`
-	ApiKeyCiphertext         []byte    `json:"api_key_ciphertext"`
-	WebhookSecretCiphertext  []byte    `json:"webhook_secret_ciphertext"`
+	ApiKeyCiphertext         []byte    `json:"-"` // 敏感字段：禁止JSON序列化
+	WebhookSecretCiphertext  []byte    `json:"-"` // 敏感字段：禁止JSON序列化
 	WebhookProxyUrl          string    `json:"webhook_proxy_url"`
 	RiskLabel                string    `json:"risk_label"`
 	SettlementBankAccountID  uuid.UUID `json:"settlement_bank_account_id"`
@@ -330,8 +330,8 @@ WHERE id = $1 AND version = $4
 
 type RotateMAESecretParams struct {
 	ID                      uuid.UUID `json:"id"`
-	ApiKeyCiphertext        []byte    `json:"api_key_ciphertext"`
-	WebhookSecretCiphertext []byte    `json:"webhook_secret_ciphertext"`
+	ApiKeyCiphertext        []byte    `json:"-"` // 敏感字段：禁止JSON序列化
+	WebhookSecretCiphertext []byte    `json:"-"` // 敏感字段：禁止JSON序列化
 	Version                 int32     `json:"version"`
 }
 

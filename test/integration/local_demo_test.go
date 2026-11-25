@@ -32,6 +32,17 @@ func setupTestPostgres(t *testing.T) (*pgxpool.Pool, func()) {
 	}
 
 	ctx := context.Background()
+	// OPS-007: 外部共享数据库优先（TEST_DATABASE_DSN），testcontainers 兜底。
+	if dsn := os.Getenv("TEST_DATABASE_DSN"); dsn != "" {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Fatalf("connect external TEST_DATABASE_DSN: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;`); err != nil {
+			t.Fatalf("reset external database: %v", err)
+		}
+		return pool, func() { pool.Close() }
+	}
 	req := testcontainers.ContainerRequest{
 		Image: "postgres:16-alpine",
 		Env: map[string]string{
@@ -84,6 +95,40 @@ func setupTestPostgres(t *testing.T) (*pgxpool.Pool, func()) {
 	return pool, cleanup
 }
 
+// seedTierRouting 补齐 tier 模型所需数据（P0-B2 之后选路要求商户 tier policy +
+// tenant_acquirer_channel 绑定 acquirer_channels）。
+// 返回 acquirer_channels.id。
+func seedTierRouting(t *testing.T, pool *pgxpool.Pool, tenantID, merchantID, providerID uuid.UUID, channelCode string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO corporate_entity (id, tenant_id, name, legal_name, country, status)
+		VALUES ($1, $2, 'Demo Merchant', 'Demo Merchant Ltd', 'US', 'ACTIVE')
+		ON CONFLICT (id) DO NOTHING
+	`, merchantID, tenantID)
+	require.NoError(t, err)
+
+	acquirerChannelID := uuid.New()
+	err = pool.QueryRow(ctx, `
+		INSERT INTO acquirer_channels
+		    (id, entity_id, provider_tier, provider_code, channel_code, credential_vault_key, status)
+		VALUES ($1, $2, 'TIER_2_COMPLIANT', 'mock', $3, 'vault-mock', 'ACTIVE')
+		ON CONFLICT (entity_id, channel_code) DO UPDATE SET status = 'ACTIVE'
+		RETURNING id
+	`, acquirerChannelID, merchantID, channelCode).Scan(&acquirerChannelID)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO merchant_routing_policy (merchant_id, provider_tier, status)
+		VALUES ($1, 'TIER_2_COMPLIANT', 'ACTIVE')
+		ON CONFLICT (merchant_id) DO UPDATE SET status = 'ACTIVE'
+	`, merchantID)
+	require.NoError(t, err)
+
+	return acquirerChannelID
+}
+
 // TestLocalDemo_FullFlow 完整的本地演示流程测试
 // 测试从 migration -> seed -> registry -> checkout 的完整链路
 func TestLocalDemo_FullFlow(t *testing.T) {
@@ -91,15 +136,10 @@ func TestLocalDemo_FullFlow(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	// 1. 应用真实的 migration 文件
-	migrationPath := "../../migrations/000017_init_acquirer_registry.up.sql"
-	migrationSQL, err := os.ReadFile(migrationPath)
-	require.NoError(t, err, "应该能读取 migration 文件")
-	require.NotEmpty(t, migrationSQL, "migration 文件不应为空")
-
-	_, err = pool.Exec(ctx, string(migrationSQL))
-	require.NoError(t, err, "应该能应用 migration")
-	log.Println("Migration applied successfully")
+	// 1. 应用完整迁移（registry 依赖 000028 引入的 acquirer_channels，
+	//    只跑 000017 会导致 LoadAll 报表不存在）
+	runMigrations(t, pool)
+	log.Println("Migrations applied successfully")
 
 	// 2. 执行 seed 逻辑
 	tenantID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
@@ -117,7 +157,7 @@ func TestLocalDemo_FullFlow(t *testing.T) {
 	channelConfigJSON, _ := json.Marshal(channelConfig)
 
 	mockProviderID := uuid.New()
-	_, err = pool.Exec(ctx, `
+	_, err := pool.Exec(ctx, `
 		INSERT INTO payment_provider (id, provider_code, provider_name, provider_type, is_active, version, created_at, updated_at)
 		VALUES ($1, 'mock', 'Mock Provider', 'CARD', true, 1, $2, $2)
 		ON CONFLICT (provider_code) DO UPDATE SET
@@ -133,23 +173,26 @@ func TestLocalDemo_FullFlow(t *testing.T) {
 	require.NoError(t, err)
 	log.Printf("Mock provider created: %s", existingProviderID)
 
-	// 创建 mock channel
+	// 创建 mock channel（并补齐 tier policy / acquirer_channels 绑定）
+	acquirerChannelID := seedTierRouting(t, pool, tenantID, merchantID, existingProviderID, "mock_default")
 	mockChannelID := uuid.New()
 	_, err = pool.Exec(ctx, `
 		INSERT INTO tenant_acquirer_channel (
 			id, tenant_id, merchant_id, provider_id, channel_code, channel_name,
-			payment_method, currencies, channel_config, is_active, version, created_at, updated_at
+			payment_method, currencies, channel_config, is_active, version, created_at, updated_at,
+			acquirer_channel_id
 		)
 		VALUES ($1, $2, $3, $4, 'mock_default', 'Mock Default Channel',
-			'card', '["USD","EUR","GBP"]', $5, true, 1, $6, $6)
+			'card', '["USD","EUR","GBP"]', $5, true, 1, $6, $6, $7)
 		ON CONFLICT (tenant_id, merchant_id, channel_code) DO UPDATE SET
 			channel_name = EXCLUDED.channel_name,
 			payment_method = EXCLUDED.payment_method,
 			currencies = EXCLUDED.currencies,
 			channel_config = EXCLUDED.channel_config,
 			is_active = EXCLUDED.is_active,
+			acquirer_channel_id = EXCLUDED.acquirer_channel_id,
 			updated_at = $6
-	`, mockChannelID, tenantID, merchantID, existingProviderID, channelConfigJSON, time.Now())
+	`, mockChannelID, tenantID, merchantID, existingProviderID, channelConfigJSON, time.Now(), acquirerChannelID)
 	require.NoError(t, err)
 
 	var existingChannelID uuid.UUID
@@ -195,10 +238,11 @@ func TestLocalDemo_FullFlow(t *testing.T) {
 
 	// 测试 order_success -> CAPTURED
 	result, err := gw.Charge(ctx, checkout.PaymentRequest{
-		OrderID:    "order_success",
-		MerchantID: merchantID.String(),
-		Amount:     decimal.NewFromFloat(100.00),
-		Currency:   "USD",
+		OrderID:           "order_success",
+		MerchantID:        merchantID.String(),
+		Amount:            decimal.NewFromFloat(100.00),
+		Currency:          "USD",
+		AcquirerChannelID: existingChannelID,
 	})
 	require.NoError(t, err, "order_success 应该成功")
 	require.NotNil(t, result, "order_success 应该返回结果")
@@ -207,10 +251,11 @@ func TestLocalDemo_FullFlow(t *testing.T) {
 
 	// 测试 order_fail -> ErrPaymentFailed
 	_, err = gw.Charge(ctx, checkout.PaymentRequest{
-		OrderID:    "order_fail",
-		MerchantID: merchantID.String(),
-		Amount:     decimal.NewFromFloat(100.00),
-		Currency:   "USD",
+		OrderID:           "order_fail",
+		MerchantID:        merchantID.String(),
+		Amount:            decimal.NewFromFloat(100.00),
+		Currency:          "USD",
+		AcquirerChannelID: existingChannelID,
 	})
 	require.Error(t, err, "order_fail 应该返回错误")
 	assert.True(t, errors.Is(err, checkout.ErrPaymentFailed), "order_fail 应该返回 ErrPaymentFailed")
@@ -218,10 +263,11 @@ func TestLocalDemo_FullFlow(t *testing.T) {
 
 	// 测试 order_timeout -> ErrPaymentTimeout
 	_, err = gw.Charge(ctx, checkout.PaymentRequest{
-		OrderID:    "order_timeout",
-		MerchantID: merchantID.String(),
-		Amount:     decimal.NewFromFloat(100.00),
-		Currency:   "USD",
+		OrderID:           "order_timeout",
+		MerchantID:        merchantID.String(),
+		Amount:            decimal.NewFromFloat(100.00),
+		Currency:          "USD",
+		AcquirerChannelID: existingChannelID,
 	})
 	require.Error(t, err, "order_timeout 应该返回错误")
 	assert.True(t, errors.Is(err, checkout.ErrPaymentTimeout), "order_timeout 应该返回 ErrPaymentTimeout")
@@ -239,38 +285,8 @@ func TestAcquirerGateway_RealModeValidation(t *testing.T) {
 	// 创建 pipeline 服务
 	pipelineSvc := pipeline.NewService(nil, time.Now)
 
-	// 创建简单的表结构（用于测试）
-	_, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS payment_provider (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			provider_code VARCHAR(50) UNIQUE NOT NULL,
-			provider_name VARCHAR(255) NOT NULL,
-			provider_type VARCHAR(50) NOT NULL,
-			config_json JSONB NOT NULL DEFAULT '{}',
-			is_active BOOLEAN NOT NULL DEFAULT true,
-			version INTEGER NOT NULL DEFAULT 1,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS tenant_acquirer_channel (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			tenant_id UUID NOT NULL,
-			merchant_id UUID NOT NULL,
-			channel_code VARCHAR(100) NOT NULL,
-			provider_id UUID NOT NULL,
-			channel_name TEXT NOT NULL DEFAULT '',
-			payment_method TEXT NOT NULL DEFAULT 'card',
-			currencies JSONB NOT NULL DEFAULT '["USD"]',
-			channel_config JSONB NOT NULL DEFAULT '{}',
-			is_active BOOLEAN NOT NULL DEFAULT true,
-			version INTEGER NOT NULL DEFAULT 1,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			UNIQUE(tenant_id, merchant_id, channel_code)
-		);
-	`)
-	require.NoError(t, err)
+	// 完整迁移：registry.LoadAll 依赖 000028 的 acquirer_channels
+	runMigrations(t, pool)
 
 	// 创建 mock channel
 	tenantID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
@@ -286,20 +302,23 @@ func TestAcquirerGateway_RealModeValidation(t *testing.T) {
 	}
 	channelConfigJSON, _ := json.Marshal(channelConfig)
 
-	_, err = pool.Exec(ctx, `
+	_, err := pool.Exec(ctx, `
 		INSERT INTO payment_provider (id, provider_code, provider_name, provider_type, is_active, version, created_at, updated_at)
 		VALUES ($1, 'mock', 'Mock Provider', 'CARD', true, 1, $2, $2)
 	`, mockProviderID, time.Now())
 	require.NoError(t, err)
 
+	// tier policy + acquirer_channels 绑定
+	acquirerChannelID := seedTierRouting(t, pool, tenantID, merchantID, mockProviderID, "mock_default")
 	_, err = pool.Exec(ctx, `
 		INSERT INTO tenant_acquirer_channel (
 			id, tenant_id, merchant_id, channel_code, provider_id,
-			channel_name, payment_method, currencies, channel_config, is_active, version, created_at, updated_at
+			channel_name, payment_method, currencies, channel_config, is_active, version, created_at, updated_at,
+			acquirer_channel_id
 		)
 		VALUES ($1, $2, $3, 'mock_default', $4,
-			'Mock Channel', 'card', '["USD"]', $5, true, 1, $6, $6)
-	`, mockChannelID, tenantID, merchantID, mockProviderID, channelConfigJSON, time.Now())
+			'Mock Channel', 'card', '["USD"]', $5, true, 1, $6, $6, $7)
+	`, mockChannelID, tenantID, merchantID, mockProviderID, channelConfigJSON, time.Now(), acquirerChannelID)
 	require.NoError(t, err)
 
 	// 初始化 registry
@@ -342,11 +361,12 @@ func TestAcquirerGateway_RealModeValidation(t *testing.T) {
 	t.Run("MockMode_AllowsRawCard", func(t *testing.T) {
 		gw := checkout.NewAcquirerGateway(acqReg, pipelineSvc, false) // isReal=false
 		result, err := gw.Charge(ctx, checkout.PaymentRequest{
-			OrderID:    "order_success",
-			MerchantID: merchantID.String(),
-			Amount:     decimal.NewFromFloat(100.00),
-			Currency:   "USD",
-			CardNumber: "4242424242424242",
+			OrderID:           "order_success",
+			MerchantID:        merchantID.String(),
+			Amount:            decimal.NewFromFloat(100.00),
+			Currency:          "USD",
+			CardNumber:        "4242424242424242",
+			AcquirerChannelID: mockChannelID,
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, "CAPTURED", result.Status) // 修正：应该是 CAPTURED 不是 success
