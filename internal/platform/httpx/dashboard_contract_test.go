@@ -40,7 +40,7 @@ func TestDashboard_TabSectionContract(t *testing.T) {
 	}
 
 	for _, key := range []string{"overview", "merchant-onboarding", "payment-orders", "acquirer-channels",
-		"payment-refunds", "payment-settlements", "payment-payouts", "risk-ops", "approval-inbox"} {
+		"payment-refunds", "payment-settlements", "payment-payouts", "risk-ops", "approval-inbox", "design-system"} {
 		if !tabs[key] {
 			t.Errorf("missing operational navigation %q", key)
 		}

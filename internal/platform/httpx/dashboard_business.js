@@ -2,16 +2,16 @@
 (function () {
   'use strict';
   var pages = {
-    overview: ['工作台', '', '⌂'],
+    overview: ['资金总览', '查看交易处理、结算进度与待处理异常。', '⌂', '运营工作台 / 资金概览'],
     'merchant-onboarding': ['商户与站点', '维护商户资料、收款规则和外部站点的授权记录。', '◇'],
     'acquirer-channels': ['收单通道', '管理机构账户、凭证与通道启停。', '⇄'],
     'payment-orders': ['支付订单', '查询每次支付的状态。结果待确认时，先核对机构记录。', '▤'],
     'payment-refunds': ['退款与争议', '跟进退款状态，按原订单核对金额。', '↶'],
-    'payment-settlements': ['结算与对账', '查看内部结算批次，通过银行入账核对实际到账。', '▥'],
+    'payment-settlements': ['结算管理', '按状态查阅结算批次及时间窗口。', '⇄', '运营工作台 / 结算'],
     'payment-payouts': ['出金', '查询出金申请及机构处理状态。', '▱'],
     'bank-vba': ['银行账户与入账', '管理银行收款账户、查看到账进度与对账结果。', '▥'],
     'approval-inbox': ['审批与审计', '复核重要变更，查看申请原因、变更内容和执行进度。', '✓'],
-    'risk-ops': ['风控与异常', '查看风险提醒、冻结状态和待执行任务。', '◈'],
+    'risk-ops': ['待办与风险', '查看风险提醒、冻结状态和待执行任务。', '⚑', '运营工作台 / 待办与风险'],
     'channel-risk': ['收款风险规则', '设置支付通道的风险规则，查看人工调整记录。', '⊙'],
     'merchant-reserve': ['商户准备金', '设置商户预留资金比例，查看持有和释放情况。', '◴'],
     'fee-allocation': ['费用明细', '查看支付、换汇和资金流转产生的费用。', '≋'],
@@ -21,7 +21,8 @@
     'universal-adapter': ['支付机构与接入', '管理支付服务机构和接入通道。首次接入通常需要技术人员配置。', '⌘'],
     'corporate-entity': ['经营主体', '维护实际开展业务的公司及其注册地区。', '▧'],
     'asset-bridge': ['币种兑换', '管理币种间的兑换规则、价格偏差和执行方式。', '↔'],
-    'wallet-policy': ['收款钱包', '管理允许接收资金的钱包地址和用途。', '▣']
+    'wallet-policy': ['收款钱包', '管理允许接收资金的钱包地址和用途。', '▣'],
+    'design-system': ['组件规范', '确认颜色、文字层级与按钮行为后，再应用到实际后台。', '◇', '设计评审 / 蓝白金融风']
   };
   var words = {
     USD: '美元（USD）', SGD: '新加坡元（SGD）', HKD: '港币（HKD）', EUR: '欧元（EUR）', GBP: '英镑（GBP）', AED: '阿联酋迪拉姆（AED）',
@@ -59,6 +60,27 @@
     return el;
   }
   function translated(value) { return words[value] || value; }
+  var atlasPaths = {
+    mark:['M5 18V6l14 12V6','M5 12h3m8 0h3'],
+    overview:['M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z'],
+    'payment-settlements':['M4 8h16l-4-4M20 16H4l4 4'],
+    'risk-ops':['M5 21V4m0 0c5-3 9 4 14 1v10c-5 3-9-4-14-1'],
+    'design-system':['m12 3 9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 16l9 5 9-5'],
+    calendar:['M4 6h16v15H4zM8 3v6m8-6v6M4 11h16'],
+    chevron:['m9 5l7 7-7 7'],
+    download:['M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4'],
+    search:['M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM21 21l-4.3-4.3'],
+    warning:['M12 3 2 20h20L12 3zM12 9v4m0 3h.01']
+  };
+  function atlasIcon(name) {
+    var paths = atlasPaths[name];
+    if (!paths) return null;
+    var ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns,'svg');
+    svg.setAttribute('viewBox','0 0 24 24'); svg.setAttribute('aria-hidden','true'); svg.classList.add('atlas-icon');
+    paths.forEach(function (data) { var path = document.createElementNS(ns,'path'); path.setAttribute('d',data); svg.appendChild(path); });
+    return svg;
+  }
+  window.atlasIcon = atlasIcon;
   function messageRow(id, text, columns) {
     var tbody = document.getElementById(id); if (!tbody) return;
     var tr = node('tr'), td = node('td', 'empty', text); td.colSpan = columns; tr.appendChild(td); tbody.replaceChildren(tr);
@@ -243,47 +265,93 @@
     var nav = document.querySelector('.nav');
     function navButton(key) { return Array.from(nav.querySelectorAll('[data-tab]')).find(function (btn) { return btn.dataset.tab === key; }); }
     var groups = [
-      ['支付运营', ['overview', 'merchant-onboarding', 'payment-orders', 'acquirer-channels', 'payment-refunds', 'payment-settlements', 'payment-payouts', 'risk-ops', 'approval-inbox']],
+      ['工作台', ['overview', 'payment-settlements', 'risk-ops']],
+      ['设计评审', ['design-system']],
+      ['支付运营', ['merchant-onboarding', 'payment-orders', 'acquirer-channels', 'payment-refunds', 'payment-payouts', 'approval-inbox']],
       ['资金与风险', ['bank-vba', 'merchant-reserve', 'fee-allocation', 'channel-risk', 'pipeline-isolation', 'compliance-rfi']],
       ['业务配置', ['issuing-pools', 'universal-adapter', 'corporate-entity', 'asset-bridge', 'wallet-policy']]
     ];
-    groups.forEach(function (group) {
-      nav.appendChild(node('div', 'nav-group-label', group[0]));
+    var operationMenu = node('details','atlas-operations-nav');
+    operationMenu.appendChild(node('summary','','全部业务功能'));
+    groups.forEach(function (group,index) {
+      var container = index < 2 ? nav : operationMenu;
+      container.appendChild(node('div', 'nav-group-label' + (index === 1 ? ' atlas-nav-divider' : ''), group[0]));
       group[1].forEach(function (key) {
         var btn = navButton(key);
         btn.textContent = pages[key][0];
-        var icon = node('span', 'nav-icon', pages[key][2]); icon.setAttribute('aria-hidden', 'true');
-        btn.prepend(icon); nav.appendChild(btn);
+        var icon = node('span', 'nav-icon'); icon.setAttribute('aria-hidden', 'true');
+        icon.append(atlasIcon(key) || document.createTextNode(pages[key][2]));
+        btn.prepend(icon); container.appendChild(btn);
       });
     });
-    var footer = node('div', 'nav-footer');
-    footer.appendChild(document.getElementById('logout-btn')); nav.appendChild(footer);
+    nav.appendChild(operationMenu);
+    var logo = nav.querySelector('.logo');
+    var wordmark = node('span', 'atlas-wordmark');
+    wordmark.append(node('strong', '', 'NexusGlobal'), node('small', '', '资金运营台'));
+    var mark = node('span', 'atlas-brand-mark'); mark.appendChild(atlasIcon('mark'));
+    logo.replaceChildren(mark, wordmark);
+    var footer = node('div', 'nav-footer'), avatar = node('span', 'atlas-avatar', 'NG');
+    avatar.setAttribute('aria-hidden', 'true');
+    var footerLabel = node('span'); footerLabel.append(node('strong', '', '运营工作台'), node('small', '', '验收环境 · 隔离数据库'));
+    var logout = document.getElementById('logout-btn');
+    if (logout) {
+      logout.classList.add('atlas-footer-logout'); logout.textContent = '退出登录';
+      if (logout.parentElement && logout.parentElement.tagName === 'SPAN') logout.parentElement.remove();
+    }
+    footer.append(avatar, footerLabel); if (logout) footer.appendChild(logout); nav.appendChild(footer);
     var main = document.querySelector('.main');
     var top = node('header', 'workspace-top');
-    var crumb = node('div', 'workspace-breadcrumb', '支付管理');
-    var current = node('strong', '', '工作台'); current.id = 'workspace-current'; crumb.appendChild(current); top.appendChild(crumb);
+    var crumb = node('div', 'workspace-breadcrumb', '机构运营');
+    var separator = atlasIcon('chevron'); separator.setAttribute('aria-hidden', 'true');
+    var current = node('strong', '', '资金总览'); current.id = 'workspace-current'; crumb.append(separator, current); top.appendChild(crumb);
     var meta = node('div', 'workspace-meta');
-    meta.appendChild(node('span', 'environment-chip', translated(document.querySelector('#tab-overview .stat:nth-child(4) .value').textContent.trim())));
-    meta.appendChild(node('time', '', new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai',year:'numeric',month:'long',day:'numeric'}).format(new Date())));
+    var chip = node('span', 'environment-chip', '演示数据');
+    var environment = document.querySelector('#tab-overview .stat:nth-child(4) .value');
+    if (environment) chip.title = '运行环境：' + environment.textContent.trim();
+    meta.appendChild(chip);
+    var kitLink = node('button','atlas-button atlas-top-kit atlas-compact','查看规范'); kitLink.type = 'button';
+    kitLink.addEventListener('click',function () { navButton('design-system').click(); }); meta.appendChild(kitLink);
     top.appendChild(meta); main.prepend(top);
     var mobileNav = node('select', 'mobile-navigation'); mobileNav.setAttribute('aria-label', '切换管理功能');
     groups.forEach(function (group) {
       var optgroup = node('optgroup'); optgroup.label = group[0];
       group[1].forEach(function (key) { optgroup.appendChild(new Option(pages[key][0], key)); }); mobileNav.appendChild(optgroup);
     });
-    top.after(mobileNav);
+    var mobileShell = node('div','atlas-mobile-shell');
+    var mobileQuick = node('div','atlas-mobile-quick');
+    var mobileEntries = groups[0][1].concat(groups[1][1]).map(function (key) {
+      var control = node('button','',pages[key][0]); control.type = 'button';
+      control.prepend(atlasIcon(key)); control.setAttribute('aria-current',key === 'overview' ? 'page' : 'false');
+      control.addEventListener('click',function () { navButton(key).click(); }); mobileQuick.appendChild(control);
+      return [key,control];
+    });
+    var mobileMore = node('details','atlas-mobile-more'); mobileMore.append(node('summary','','全部业务功能'),mobileNav);
+    mobileShell.append(logo.cloneNode(true),mobileQuick,mobileMore);
+    if (logout) { var mobileLogout = logout.cloneNode(true); mobileLogout.removeAttribute('id'); mobileLogout.classList.add('atlas-mobile-logout'); mobileShell.appendChild(mobileLogout); }
+    mobileShell.addEventListener('click', function (event) {
+      if (event.target.closest('.atlas-mobile-logout') && window.doLogout) { event.preventDefault(); window.doLogout(); }
+    });
+    main.prepend(mobileShell);
     mobileNav.addEventListener('change', function () { navButton(mobileNav.value).click(); });
     Object.keys(pages).forEach(function (key) {
       var tab = document.getElementById('tab-' + key);
       var heading = node('div', 'page-heading');
-      var h1 = node('h1', '', pages[key][0]); h1.tabIndex = -1; heading.appendChild(h1);
-      if (pages[key][1]) heading.appendChild(node('p', '', pages[key][1]));
+      var headingCopy = node('div');
+      headingCopy.appendChild(node('div', 'eyebrow', pages[key][3] || ('运营工作台 / ' + pages[key][0])));
+      var h1 = node('h1', '', pages[key][0]); h1.tabIndex = -1; headingCopy.appendChild(h1);
+      if (pages[key][1]) headingCopy.appendChild(node('p', '', pages[key][1]));
+      heading.appendChild(headingCopy);
+      if (key === 'design-system') {
+        var review = node('span', 'environment-chip', 'V2 · 审阅稿');
+        review.title = '当前审阅稿版本';
+        heading.appendChild(review);
+      }
       tab.prepend(heading);
       var options = node('div', 'display-options');
       var label = node('label'); var checkbox = node('input'); checkbox.type = 'checkbox';
       checkbox.addEventListener('change', function () { tab.classList.toggle('show-technical', checkbox.checked); });
       label.appendChild(checkbox); label.appendChild(document.createTextNode('显示技术编号')); options.appendChild(label);
-      if (key !== 'overview' && !key.startsWith('payment-')) heading.after(options);
+      if (key !== 'overview' && key !== 'design-system' && key !== 'risk-ops' && !key.startsWith('payment-')) heading.after(options);
     });
     var overview = document.getElementById('tab-overview');
     var systemGrid = overview.querySelector('.grid');
@@ -356,6 +424,8 @@
     window.showTab = function (key, button) {
       originalShowTab(key, button); current.textContent = pages[key][0];
       mobileNav.value = key;
+      mobileEntries.forEach(function (entry) { entry[1].setAttribute('aria-current',entry[0] === key ? 'page' : 'false'); });
+      if (operationMenu.contains(button)) operationMenu.open = true;
       if (key === 'approval-inbox') loadApprovalInbox();
       if (key === 'channel-risk') loadRiskOverrides();
       nav.querySelectorAll('[data-tab]').forEach(function (btn) { btn.setAttribute('aria-current', btn === button ? 'page' : 'false'); });

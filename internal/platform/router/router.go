@@ -394,6 +394,7 @@ func BuildRouter(deps Deps) *chi.Mux {
 			credentialWriteMW := httpx.RequirePermission(httpx.PermAdminCredentialWrite)
 			r.With(readMW).Get("/operations/readiness", operationsReadiness(cfg))
 			r.With(readMW).Get("/operations/summary", adminH.WorkbenchSummary)
+			r.With(readMW).Get("/operations/funds.csv", adminH.WorkbenchExport)
 			r.With(readMW).Get("/operations/records/{resource}", adminH.WorkbenchRecords)
 
 			// ── 只读路由（admin:read）──

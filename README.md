@@ -152,8 +152,15 @@ This creates:
 #### Dashboard Access
 
 1. Open dashboard: http://localhost:8080/admin/dashboard
-2. Set JWT token in the dashboard UI (click "设置 Token" button)
-3. Navigate to "通道管理" tab
+2. Sign in using your existing administrator account if prompted.
+3. Open "全部业务功能" in the sidebar to find additional business pages.
+
+The Funds Overview shows the current tenant's daily captured payments, confirmed payouts,
+available balance, and follow-up counts in Beijing business time (UTC+8). Amounts are
+grouped by currency; the CSV keeps exact amounts in minor units. Settlement Management
+lists posted batches, captured payments awaiting settlement, and bank reconciliation
+exceptions as separate views. The Component Specification tab previews the visual states
+without calling any business mutation endpoints.
 
 #### Channel Operations via API
 

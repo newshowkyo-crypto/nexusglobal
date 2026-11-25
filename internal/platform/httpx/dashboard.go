@@ -289,8 +289,10 @@ h4{color:#f1f5f9;font-size:14px;margin:12px 0 8px}
 <button data-tab="payment-refunds">退款与争议</button>
 <button data-tab="payment-settlements">结算与对账</button>
 <button data-tab="payment-payouts">出金</button>
+<button data-tab="design-system">组件规范</button>
 </nav>
 <div class="main">
+<section id="tab-design-system" class="tab"></section>
 <section id="tab-payment-orders" class="tab"></section>
 <section id="tab-payment-refunds" class="tab"></section>
 <section id="tab-payment-settlements" class="tab"></section>
@@ -385,12 +387,14 @@ h4{color:#f1f5f9;font-size:14px;margin:12px 0 8px}
 <table><thead><tr><th>策略代码</th><th>资产</th><th>网络</th><th>地址</th><th>类型</th><th>单笔限额</th><th>日限额</th><th>状态</th><th>操作</th></tr></thead><tbody id="wallet-policies-table"><tr><td colspan="9" class="loading">加载中...</td></tr></tbody></table></div>
 </div>
 <div id="tab-risk-ops" class="tab">
+<details class="atlas-legacy-disclosure"><summary>旧版风控明细（风险事件 / 冻结实体 / 待处理任务）</summary>
 <div class="section"><h2>风险事件 <button class="refresh-btn" data-action="loadRiskEvents">刷新</button></h2>
 <table><thead><tr><th>ID</th><th>商户</th><th>站点</th><th>通道ID</th><th>处理结果</th><th>原因</th><th>发生时间</th><th>操作</th></tr></thead><tbody id="risk-events-table"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody></table></div>
 <div class="section"><h2>风险冻结实体 <button class="refresh-btn" data-action="loadRiskHoldStatus">刷新</button></h2>
 <table><thead><tr><th>实体类型</th><th>实体ID</th><th>名称</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="risk-hold-table"><tr><td colspan="6" class="loading">加载中...</td></tr></tbody></table></div>
 <div class="section"><h2>待处理任务 <button class="refresh-btn" data-action="loadPendingTasks">刷新</button></h2>
 <table><thead><tr><th>任务ID</th><th>事件类型</th><th>状态</th><th>聚合ID</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="pending-tasks-table"><tr><td colspan="6" class="loading">加载中...</td></tr></tbody></table></div>
+</details>
 </div>
 <div id="tab-channel-risk" class="tab">
 <div class="section"><h2>通道风控配置 <button class="refresh-btn" data-action="loadChannelRiskConfig">刷新</button></h2>

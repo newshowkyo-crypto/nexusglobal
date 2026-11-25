@@ -25,6 +25,9 @@ var dashboardWorkbenchJS string
 //go:embed dashboard_workbench.css
 var dashboardWorkbenchCSS string
 
+//go:embed dashboard_atlas.css
+var dashboardAtlasCSS string
+
 func businessDashboardHTML(html, nonce string) string {
 	html = strings.NewReplacer(
 		"NexusGlobal MAMR 管理后台", "NexusGlobal 支付管理中心",
@@ -109,6 +112,6 @@ func businessDashboardHTML(html, nonce string) string {
 		"请选择商户（需有ACTIVE路由策略）", "请选择已配置收款规则的商户",
 		"仅接受 vault:// 引用，禁止明文密钥", "填写已保存的安全凭证引用，请勿粘贴密钥原文。",
 	).Replace(html)
-	html = strings.Replace(html, "</style>", dashboardBusinessCSS+"\n"+dashboardWorkbenchCSS+"\n</style>", 1)
+	html = strings.Replace(html, "</style>", dashboardBusinessCSS+"\n"+dashboardWorkbenchCSS+"\n"+dashboardAtlasCSS+"\n</style>", 1)
 	return strings.Replace(html, "</body>", "<script nonce=\""+nonce+"\">\n"+dashboardBusinessJS+"\n"+dashboardOperationsJS+"\n"+dashboardCredentialsJS+"\n"+dashboardWorkbenchJS+"\n</script>\n</body>", 1)
 }

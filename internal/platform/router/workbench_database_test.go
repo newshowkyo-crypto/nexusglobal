@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,18 @@ func TestWorkbenchDatabase(t *testing.T) {
 	}
 	defer func() {
 		for _, query := range []string{
+			"DELETE FROM ledger_transaction WHERE aggregate_type='payout_request' AND aggregate_id IN (SELECT id FROM payout_request WHERE merchant_id IN ($1,$2))",
+			"DELETE FROM payout_request WHERE merchant_id IN ($1,$2)",
+			"DELETE FROM merchant_payout_address WHERE merchant_id IN ($1,$2)",
+		} {
+			_, err := db.Exec(ctx, query, merchant, foreignMerchant)
+			require.NoError(t, err)
+		}
+		for _, table := range []string{"bank_collection_reconciliation_log", "bank_collection_intent", "settlement_batch"} {
+			_, err := db.Exec(ctx, "DELETE FROM "+table+" WHERE tenant_id IN ($1,$2)", owner, neighbor)
+			require.NoError(t, err)
+		}
+		for _, query := range []string{
 			"DELETE FROM provider_credential_vault WHERE channel_id IN (SELECT id FROM tenant_acquirer_channel WHERE merchant_id=$1)",
 			"DELETE FROM tenant_acquirer_channel WHERE merchant_id=$1",
 			"DELETE FROM acquirer_channels WHERE entity_id=$1",
@@ -48,7 +61,7 @@ func TestWorkbenchDatabase(t *testing.T) {
 			_, err := db.Exec(ctx, query, merchant)
 			require.NoError(t, err)
 		}
-		for _, table := range []string{"payment_attempts", "merchant_site", "corporate_entity"} {
+		for _, table := range []string{"refund_request", "payment_attempts", "merchant_site", "corporate_entity"} {
 			_, err := db.Exec(ctx, "DELETE FROM "+table+" WHERE tenant_id IN ($1,$2)", owner, neighbor)
 			require.NoError(t, err)
 		}
@@ -66,6 +79,35 @@ func TestWorkbenchDatabase(t *testing.T) {
 		FROM generate_series(1,30) i
 		UNION ALL SELECT gen_random_uuid(),$3::uuid,$4::uuid,'S2S','foreign','OTHER-TENANT-ORDER',100,'USD','UNKNOWN_EXTERNAL_STATE',now(),NULL,NULL`,
 		merchant, owner, foreignMerchant, neighbor)
+	fixture(`INSERT INTO refund_request(tenant_id,merchant_id,payment_attempt_id,merchant_refund_id,idempotency_key,amount_minor,currency,status)
+		SELECT p.tenant_id,p.merchant_id,p.id,'RF-UI-00'||s.i,'atlas-ui-refund-'||s.i,
+			1000+s.i*100,'CNY',CASE s.i WHEN 1 THEN 'PENDING' WHEN 2 THEN 'PROCESSING' ELSE 'SUCCEEDED' END
+		FROM generate_series(1,3) s(i)
+		JOIN payment_attempts p ON p.tenant_id=$1 AND p.merchant_order_id='DEMO-ORDER-'||lpad(s.i::text,2,'0')`, owner)
+	fixture(`INSERT INTO settlement_batch(tenant_id,merchant_id,currency,business_date,status,total_amount_minor,item_count)
+		VALUES ($1,$2,'CNY',(now() AT TIME ZONE 'Asia/Shanghai')::date,'SETTLED',59900,1),
+		       ($3,$4,'USD',(now() AT TIME ZONE 'Asia/Shanghai')::date,'SETTLED',88800,1)`, owner, merchant, neighbor, foreignMerchant)
+	fixture(`WITH intent AS (
+		INSERT INTO bank_collection_intent(tenant_id,merchant_id,order_id,asset_code,expected_amount,payment_reference,expires_at)
+		VALUES ($1,$2,'atlas-order','EUR',100.50,$1::uuid::text||'-atlas',now()),
+		       ($3,$4,'other-order','GBP',200.25,$3::uuid::text||'-atlas',now())
+		RETURNING id,tenant_id,expected_amount
+	)
+	INSERT INTO bank_collection_reconciliation_log(tenant_id,intent_id,reconciliation_date,matched,mismatch_type,expected_amount)
+	SELECT tenant_id,id,(now() AT TIME ZONE 'Asia/Shanghai')::date,false,'AMOUNT_MISMATCH',expected_amount FROM intent`, owner, merchant, neighbor, foreignMerchant)
+	fixture(`WITH addresses AS (
+		INSERT INTO merchant_payout_address(merchant_id,target_asset,target_network,address_format_type,target_address_enc,target_address_hash,target_address_masked)
+		VALUES ($1,'USDT','TEST','TEST','\x00','atlas-local','masked'),($2,'USDT','TEST','TEST','\x00','atlas-neighbor','masked')
+		RETURNING id,merchant_id
+	), payouts AS (
+		INSERT INTO payout_request(merchant_id,payout_address_id,amount,fiat_currency,target_asset,target_network,status,idempotency_key)
+		SELECT merchant_id,id,CASE WHEN merchant_id=$1 THEN 55550 ELSE 99990 END,
+		 CASE WHEN merchant_id=$1 THEN 'CNY' ELSE 'GBP' END,'USDT','TEST','Confirmed',merchant_id::text||'-payout' FROM addresses
+		RETURNING id
+	)
+	INSERT INTO ledger_transaction(idempotency_key,transaction_type,aggregate_type,aggregate_id,created_at)
+	SELECT id::text||'-confirm','PAYOUT_CONFIRM','payout_request',id,now() FROM payouts
+	UNION ALL SELECT id::text||'-freeze','PAYOUT_FREEZE','payout_request',id,now() FROM payouts`, merchant, foreignMerchant)
 
 	deps := makeDeps()
 	deps.Pool = db
@@ -101,6 +143,42 @@ func TestWorkbenchDatabase(t *testing.T) {
 	require.Contains(t, summary.Body.String(), `"attempts":30`)
 	require.Contains(t, summary.Body.String(), `"captured":28`)
 	require.Contains(t, summary.Body.String(), `"amount":"479200"`)
+	var stats struct {
+		Metrics struct {
+			SettledBatches           int               `json:"settled_batches"`
+			ReconciliationExceptions int               `json:"reconciliation_exceptions"`
+			OpenRefunds              int               `json:"open_refunds"`
+			CapturedFlow             []json.RawMessage `json:"captured_flow"`
+			PaidFlow                 []json.RawMessage `json:"paid_flow"`
+		} `json:"metrics"`
+	}
+	require.NoError(t, json.Unmarshal(summary.Body.Bytes(), &stats))
+	require.Equal(t, 1, stats.Metrics.SettledBatches)
+	require.Equal(t, 1, stats.Metrics.ReconciliationExceptions)
+	require.Len(t, stats.Metrics.CapturedFlow, 1)
+	require.Contains(t, string(stats.Metrics.CapturedFlow[0]), `"amount_minor":"1677200"`)
+	require.Len(t, stats.Metrics.PaidFlow, 1)
+	require.Contains(t, string(stats.Metrics.PaidFlow[0]), `"amount":"55550.0000"`)
+	export := get(owner, base+"funds.csv")
+	require.Equal(t, http.StatusOK, export.Code, export.Body.String())
+	require.Contains(t, export.Header().Get("Content-Disposition"), "attachment;")
+	require.Equal(t, "no-store", export.Header().Get("Cache-Control"))
+	require.Contains(t, export.Body.String(), "CNY,已收款,1677200")
+	require.Contains(t, export.Body.String(), "CNY,已确认出款,55550.0000")
+	require.NotContains(t, export.Body.String(), "GBP")
+	unauthenticated := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, base+"funds.csv", nil))
+	require.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
+	require.NotContains(t, get(neighbor, base+"funds.csv").Body.String(), "CNY")
+	unsettled := get(owner, base+"records/unsettled-orders")
+	require.Equal(t, http.StatusOK, unsettled.Code, unsettled.Body.String())
+	require.Contains(t, unsettled.Body.String(), "DEMO-ORDER-28")
+	require.NotContains(t, unsettled.Body.String(), "DEMO-ORDER-20")
+	exceptions := get(owner, base+"records/reconciliation-exceptions")
+	require.Equal(t, http.StatusOK, exceptions.Code, exceptions.Body.String())
+	require.Contains(t, exceptions.Body.String(), "AMOUNT_MISMATCH")
+	require.Contains(t, exceptions.Body.String(), "EUR")
+	require.NotContains(t, exceptions.Body.String(), "GBP")
 	var first struct {
 		Items []json.RawMessage `json:"items"`
 		Next  string            `json:"next"`
@@ -120,6 +198,24 @@ func TestWorkbenchDatabase(t *testing.T) {
 	require.Equal(t, http.StatusOK, filtered.Code, filtered.Body.String())
 	require.Contains(t, filtered.Body.String(), "DEMO-ORDER-30")
 	require.NotContains(t, filtered.Body.String(), "DEMO-ORDER-29")
+	openRefunds := get(owner, base+"records/refunds?status=PENDING,PROCESSING,UNKNOWN")
+	require.Equal(t, http.StatusOK, openRefunds.Code, openRefunds.Body.String())
+	var openRefundItems struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(openRefunds.Body.Bytes(), &openRefundItems))
+	require.Len(t, openRefundItems.Items, 2)
+	require.NotContains(t, openRefunds.Body.String(), "SUCCEEDED")
+	require.Contains(t, openRefunds.Body.String(), "RF-UI-001")
+	require.Contains(t, openRefunds.Body.String(), "RF-UI-002")
+	require.Equal(t, stats.Metrics.OpenRefunds, len(openRefundItems.Items))
+	pendingRefunds := get(owner, base+"records/refunds?status=PENDING")
+	require.Equal(t, http.StatusOK, pendingRefunds.Code, pendingRefunds.Body.String())
+	require.Contains(t, pendingRefunds.Body.String(), "RF-UI-001")
+	require.NotContains(t, pendingRefunds.Body.String(), "RF-UI-002")
+	require.Equal(t, http.StatusBadRequest, get(owner, base+"records/refunds?status="+strings.Repeat("A", 129)).Code)
+	require.Equal(t, http.StatusBadRequest, get(owner, base+"records/refunds?status=PENDING,,PROCESSING").Code)
+	require.Equal(t, http.StatusBadRequest, get(owner, base+"records/refunds?status=%20%20").Code)
 	for _, resource := range []string{"refunds", "settlements", "payouts", "authorizations"} {
 		result := get(owner, base+"records/"+resource)
 		require.Equal(t, http.StatusOK, result.Code, result.Body.String())
