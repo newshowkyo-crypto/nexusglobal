@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -751,7 +752,7 @@ func TestSignSessionCookie_ProductionSecure(t *testing.T) {
 		Subject: "admin-001",
 		Role:    AdminRoleSecurityAdmin,
 	}
-	cookie, err := signSessionCookie(identity, "session-secret", "production")
+	cookie, err := signSessionCookie(identity, "session-secret", "production", AdminSessionMaxAge)
 	require.NoError(t, err)
 	assert.True(t, cookie.Secure, "production cookie must be Secure")
 	assert.True(t, cookie.HttpOnly, "cookie must be HttpOnly")
@@ -763,7 +764,7 @@ func TestSignSessionCookie_LocalNotSecure(t *testing.T) {
 		Subject: "admin-001",
 		Role:    AdminRoleSecurityAdmin,
 	}
-	cookie, err := signSessionCookie(identity, "session-secret", "local")
+	cookie, err := signSessionCookie(identity, "session-secret", "local", AdminSessionMaxAge)
 	require.NoError(t, err)
 	assert.False(t, cookie.Secure, "local cookie should not be Secure")
 	assert.True(t, cookie.HttpOnly, "cookie must be HttpOnly")
@@ -774,8 +775,58 @@ func TestSignSessionCookie_EmptySecret_Error(t *testing.T) {
 		Subject: "admin-001",
 		Role:    AdminRoleSecurityAdmin,
 	}
-	_, err := signSessionCookie(identity, "", "local")
+	_, err := signSessionCookie(identity, "", "local", AdminSessionMaxAge)
 	assert.Error(t, err)
+}
+
+func TestAdminSessionExchangeHandler_ConfigurableTTL(t *testing.T) {
+	jwtSecret := "jwt-secret-for-session-ttl-tests"
+	sessionSecret := "session-secret"
+	claims := validAdminClaims()
+	claims["exp"] = time.Now().Add(24 * time.Hour).Unix()
+	adminJWT := signAdminJWT(t, jwtSecret, claims)
+
+	cases := []struct {
+		name       string
+		ttl        []time.Duration
+		wantMaxAge int
+	}{
+		{name: "default stays 15m", wantMaxAge: 900},
+		{name: "4h extends session and csrf cookies together", ttl: []time.Duration{4 * time.Hour}, wantMaxAge: 14400},
+		{name: "above cap clamps to 12h", ttl: []time.Duration{48 * time.Hour}, wantMaxAge: 43200},
+		{name: "non-positive falls back to default", ttl: []time.Duration{-time.Minute}, wantMaxAge: 900},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := AdminSessionExchangeHandler(jwtSecret, sessionSecret, "local", tc.ttl...)
+			req := httptest.NewRequest(http.MethodPost, "/admin/session/exchange", strings.NewReader(`{"admin_jwt":"`+adminJWT+`"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+			var session, csrf *http.Cookie
+			for _, c := range rr.Result().Cookies() {
+				switch c.Name {
+				case AdminSessionCookieName:
+					session = c
+				case AdminCSRFCookieName:
+					csrf = c
+				}
+			}
+			require.NotNil(t, session, "session cookie must be issued")
+			require.NotNil(t, csrf, "csrf cookie must be issued")
+			assert.Equal(t, tc.wantMaxAge, session.MaxAge)
+			assert.Equal(t, tc.wantMaxAge, csrf.MaxAge, "csrf cookie must live as long as the session")
+
+			token, err := jwt.Parse(session.Value, func(*jwt.Token) (interface{}, error) { return []byte(sessionSecret), nil })
+			require.NoError(t, err)
+			sessionClaims, ok := token.Claims.(jwt.MapClaims)
+			require.True(t, ok && token.Valid)
+			lifetime := int64(sessionClaims["exp"].(float64)) - int64(sessionClaims["iat"].(float64))
+			assert.Equal(t, int64(tc.wantMaxAge), lifetime)
+		})
+	}
 }
 
 func TestSessionCookie_MerchantRole_Rejected(t *testing.T) {

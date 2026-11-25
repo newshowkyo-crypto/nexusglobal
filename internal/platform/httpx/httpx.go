@@ -280,7 +280,12 @@ function showError(msg){var el=document.getElementById('error-msg');el.textConte
 
 // AdminSessionExchangeHandler 接收预签发的短期 Admin JWT，
 // 验证成功后用 ADMIN_SESSION_SECRET 签发 HttpOnly 会话 Cookie + CSRF Cookie。
-func AdminSessionExchangeHandler(jwtSecret, sessionSecret, appEnv string) http.HandlerFunc {
+// 可选参数 sessionTTL 覆盖默认会话时长（来自 ADMIN_SESSION_TTL），超过 AdminSessionMaxTTL 会被收敛。
+func AdminSessionExchangeHandler(jwtSecret, sessionSecret, appEnv string, sessionTTL ...time.Duration) http.HandlerFunc {
+	ttl := time.Duration(0)
+	if len(sessionTTL) > 0 {
+		ttl = sessionTTL[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get("X-Request-ID")
 		if r.Method != http.MethodPost {
@@ -326,7 +331,7 @@ func AdminSessionExchangeHandler(jwtSecret, sessionSecret, appEnv string) http.H
 		}
 
 		// 签发会话 Cookie
-		sessionCookie, err := signSessionCookie(identity, sessionSecret, appEnv)
+		sessionCookie, err := signSessionCookie(identity, sessionSecret, appEnv, ttl)
 		if err != nil {
 			writeErrorJSON(w, http.StatusInternalServerError, "INTERNAL", "failed to create session", reqID)
 			return
@@ -334,7 +339,7 @@ func AdminSessionExchangeHandler(jwtSecret, sessionSecret, appEnv string) http.H
 		http.SetCookie(w, sessionCookie)
 
 		// 签发 CSRF Cookie（双提交模式）
-		csrfCookie := signCSRFCookie(appEnv)
+		csrfCookie := signCSRFCookie(appEnv, ttl)
 		if csrfCookie != nil {
 			http.SetCookie(w, csrfCookie)
 		}

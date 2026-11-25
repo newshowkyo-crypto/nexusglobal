@@ -374,7 +374,7 @@ func BuildRouter(deps Deps) *chi.Mux {
 			// ADM-020: 登录交换是未鉴权入口，用固定窗口对 IP 简单限流防爆破
 			r.Use(ipLoginRateLimit())
 			r.Get("/login", httpx.AdminLoginPageHandler(cfg.AppEnv))
-			r.Post("/session/exchange", httpx.AdminSessionExchangeHandler(cfg.JWTSecret, cfg.AdminSessionSecret, cfg.AppEnv))
+			r.Post("/session/exchange", httpx.AdminSessionExchangeHandler(cfg.JWTSecret, cfg.AdminSessionSecret, cfg.AppEnv, cfg.AdminSessionTTL))
 			r.Post("/session/logout", httpx.AdminSessionLogoutHandler(cfg.AppEnv))
 		})
 

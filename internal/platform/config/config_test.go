@@ -3,10 +3,71 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoad_AdminSessionTTL(t *testing.T) {
+	base := map[string]string{
+		"APP_ENV":                 "local",
+		"KMS_MODE":                "mock",
+		"EXTERNAL_MODE":           "mock",
+		"ACQUIRER_MODE":           "mock",
+		"ACQUIRER_PROVIDER":       "mock",
+		"ISSUING_PROVIDER":        "mock",
+		"VCC_FUNDING_PROVIDER":    "mock",
+		"CHECKOUT_ORDER_PROVIDER": "mock",
+		"POSTGRES_DSN":            "postgres://test:test@localhost/test",
+		"MASTER_KEY_BASE64":       "dGVzdG1hc3RlcmtleTEyMzQ1Njc4OTA=",
+	}
+	cases := []struct {
+		name    string
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "default is 15m", want: 15 * time.Minute},
+		{name: "4h accepted", raw: "4h", want: 4 * time.Hour},
+		{name: "zero rejected", raw: "0", wantErr: true},
+		{name: "above 12h rejected", raw: "13h", wantErr: true},
+		{name: "garbage rejected", raw: "four-hours", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			old := make(map[string]string)
+			for k, v := range base {
+				old[k] = os.Getenv(k)
+				os.Setenv(k, v)
+			}
+			prev, had := os.LookupEnv("ADMIN_SESSION_TTL")
+			if tc.raw == "" {
+				os.Unsetenv("ADMIN_SESSION_TTL")
+			} else {
+				os.Setenv("ADMIN_SESSION_TTL", tc.raw)
+			}
+			defer func() {
+				for k, v := range old {
+					os.Setenv(k, v)
+				}
+				if had {
+					os.Setenv("ADMIN_SESSION_TTL", prev)
+				} else {
+					os.Unsetenv("ADMIN_SESSION_TTL")
+				}
+			}()
+
+			cfg, err := Load()
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.AdminSessionTTL)
+		})
+	}
+}
 
 func TestLoad_ProductionRejectsMockProviders(t *testing.T) {
 	tests := []struct {

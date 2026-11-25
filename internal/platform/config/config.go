@@ -45,6 +45,7 @@ type Config struct {
 	OutboxClaimBatch        int           `env:"OUTBOX_CLAIM_BATCH" envDefault:"16"`
 	StreamMaxDeliveries     int           `env:"STREAM_MAX_DELIVERIES" envDefault:"5"`
 	SweepTickInterval       time.Duration `env:"SWEEP_TICK_INTERVAL" envDefault:"10s"`
+	AdminSessionTTL         time.Duration `env:"ADMIN_SESSION_TTL" envDefault:"15m"` // 管理会话 Cookie 时长：默认 15m，上限 12h；生产保持默认
 	LogLevel                string        `env:"LOG_LEVEL" envDefault:"info"`
 	OTelCollectorURL        string        `env:"OTEL_COLLECTOR_URL" envDefault:""`
 	OTelSampleRatio         float64       `env:"OTEL_SAMPLE_RATIO" envDefault:"1.0"`
@@ -72,6 +73,10 @@ func Load() (*Config, error) {
 	cfg := &Config{}
 	if err := env.Parse(cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
+	}
+
+	if cfg.AdminSessionTTL <= 0 || cfg.AdminSessionTTL > 12*time.Hour {
+		return nil, fmt.Errorf("config: ADMIN_SESSION_TTL must be greater than 0 and at most 12h")
 	}
 
 	if cfg.AppEnv == "production" {

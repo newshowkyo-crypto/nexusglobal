@@ -16,7 +16,10 @@ const (
 	AdminSessionCookieName = "admin_session"
 	AdminCSRFHeaderName    = "X-CSRF-Token"
 	AdminCSRFCookieName    = "admin_csrf"
-	AdminSessionMaxAge     = 15 * time.Minute
+	// AdminSessionMaxAge 是管理后台会话的默认时长；单个实例可通过 ADMIN_SESSION_TTL 调整。
+	AdminSessionMaxAge = 15 * time.Minute
+	// AdminSessionMaxTTL 是 ADMIN_SESSION_TTL 的硬上限，防止误配出超长会话。
+	AdminSessionMaxTTL = 12 * time.Hour
 )
 
 // Admin JWT 收紧 (G03)：
@@ -154,14 +157,14 @@ func GetAdminIdentity(ctx context.Context) (*AdminIdentity, bool) {
 // Cookie 属性：HttpOnly、SameSite=Strict；production 模式下 Secure=true。
 // 会话 JWT 的 claims 复用 AdminIdentity 的 sub/role/username/tenant_id，
 // 但 iss 改为 "nexusglobal-admin-session"，aud 改为 "nexusglobal-admin-dashboard"，
-// exp 不超过 AdminSessionMaxAge（15 分钟）。
-func signSessionCookie(identity *AdminIdentity, sessionSecret, appEnv string) (*http.Cookie, error) {
+// exp 不超过 ttl（默认 AdminSessionMaxAge，可经 ADMIN_SESSION_TTL 调整）。
+func signSessionCookie(identity *AdminIdentity, sessionSecret, appEnv string, ttl time.Duration) (*http.Cookie, error) {
 	if sessionSecret == "" {
 		return nil, fmt.Errorf("ADMIN_SESSION_SECRET not configured")
 	}
 	now := time.Now()
-	// 会话有效期 = min(AdminSessionMaxAge, 来源 Admin JWT 剩余有效期)。
-	ttl := AdminSessionMaxAge
+	// 会话有效期 = min(配置时长, 来源 Admin JWT 剩余有效期)。
+	ttl = normalizeSessionTTL(ttl)
 	if !identity.SourceExpiry.IsZero() {
 		remaining := time.Until(identity.SourceExpiry)
 		if remaining < ttl {
@@ -262,7 +265,8 @@ func verifySessionCookie(r *http.Request, sessionSecret string) *AdminIdentity {
 
 // signCSRFCookie 签发一个 CSRF 双提交 Cookie。
 // Cookie 不带 HttpOnly（前端 JS 需要读取），SameSite=Strict。
-func signCSRFCookie(appEnv string) *http.Cookie {
+// MaxAge 必须与会话 Cookie 同步，否则会话仍在但写请求会因 CSRF Cookie 过期被拒。
+func signCSRFCookie(appEnv string, ttl time.Duration) *http.Cookie {
 	b := make([]byte, 32)
 	if _, err := readRandBytes(b); err != nil {
 		return nil
@@ -272,7 +276,7 @@ func signCSRFCookie(appEnv string) *http.Cookie {
 		Name:     AdminCSRFCookieName,
 		Value:    token,
 		Path:     "/admin",
-		MaxAge:   int(AdminSessionMaxAge.Seconds()),
+		MaxAge:   int(normalizeSessionTTL(ttl).Seconds()),
 		HttpOnly: false,
 		SameSite: http.SameSiteStrictMode,
 	}
@@ -280,6 +284,17 @@ func signCSRFCookie(appEnv string) *http.Cookie {
 		cookie.Secure = true
 	}
 	return cookie
+}
+
+// normalizeSessionTTL 把配置的会话时长收敛到 (0, AdminSessionMaxTTL]：非正值回退默认 15 分钟。
+func normalizeSessionTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return AdminSessionMaxAge
+	}
+	if ttl > AdminSessionMaxTTL {
+		return AdminSessionMaxTTL
+	}
+	return ttl
 }
 
 // verifyCSRFToken 验证 CSRF 双提交 token。
