@@ -1,0 +1,48 @@
+{
+	admin off
+	skip_install_trust
+	default_sni {$NEXUS_PUBLIC_HOST}
+	storage file_system {
+		root E:/Data/NexusGlobal/edge/storage
+	}
+	log {
+		output file E:/Data/NexusGlobal/edge/caddy.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}
+
+(demo_backend) {
+	reverse_proxy {args[0]} 127.0.0.1:8080 {
+		header_up -Authorization
+		header_up -True-Client-IP
+		header_up X-Real-IP {http.request.remote.host}
+	}
+}
+
+https://{$NEXUS_PUBLIC_HOST} {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+	@entry path / /admin /admin/
+	redir @entry /admin/dashboard 303
+	@demoRead {
+		method GET HEAD
+		path /admin/login /admin/dashboard /admin/operations/summary /admin/operations/funds.csv /admin/operations/records/* /admin/api/v3/approvals /admin/api/v3/approvals/*
+	}
+	@demoSession {
+		method POST
+		path /admin/session/password /admin/session/logout
+	}
+	route {
+		header Cache-Control "no-store"
+		import demo_backend @demoRead
+		import demo_backend @demoSession
+		respond 404
+	}
+}

@@ -69,6 +69,42 @@ func TestLoad_AdminSessionTTL(t *testing.T) {
 	}
 }
 
+func TestLoad_AdminDemoLogin(t *testing.T) {
+	for key, value := range map[string]string{
+		"APP_ENV":                  "local",
+		"HTTP_ADDR":                "127.0.0.1:8080",
+		"POSTGRES_DSN":             "postgres://test:test@localhost/test?sslmode=disable",
+		"MASTER_KEY_BASE64":        "test-key",
+		"EXTERNAL_MODE":            "mock",
+		"KMS_MODE":                 "mock",
+		"ACQUIRER_MODE":            "mock",
+		"JWT_SECRET":               "test-jwt-secret",
+		"ADMIN_SESSION_SECRET":     "test-admin-session-secret-long-enough",
+		"REQUIRE_ADMIN_AUTH":       "true",
+		"ADMIN_DEMO_USERNAME":      "atlas-demo",
+		"ADMIN_DEMO_PASSWORD_HASH": "$2a$10$lcMvkqChbMIYNZd9iTqDQuRkaJcT7uNsrfHV4zfyRCFB2fO681WHO",
+		"ADMIN_DEMO_TENANT_ID":     "11111111-1111-1111-1111-111111111111",
+	} {
+		t.Setenv(key, value)
+	}
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "atlas-demo", cfg.AdminDemoUsername)
+	for _, tc := range []struct{ key, value string }{
+		{"APP_ENV", "production"},
+		{"HTTP_ADDR", ":8080"},
+		{"REQUIRE_ADMIN_AUTH", "false"},
+		{"ADMIN_DEMO_TENANT_ID", ""},
+		{"ADMIN_DEMO_PASSWORD_HASH", "plaintext"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Setenv(tc.key, tc.value)
+			_, err := Load()
+			require.ErrorContains(t, err, "demo login requires")
+		})
+	}
+}
+
 func TestLoad_ProductionRejectsMockProviders(t *testing.T) {
 	tests := []struct {
 		name           string

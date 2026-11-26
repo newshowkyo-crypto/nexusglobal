@@ -3,9 +3,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Config struct {
@@ -27,6 +30,9 @@ type Config struct {
 	JWTSecret               string        `env:"JWT_SECRET" envDefault:""`
 	InternalToken           string        `env:"INTERNAL_TOKEN" envDefault:""`
 	AdminSessionSecret      string        `env:"ADMIN_SESSION_SECRET" envDefault:""`
+	AdminDemoUsername       string        `env:"ADMIN_DEMO_USERNAME"`
+	AdminDemoPasswordHash   string        `env:"ADMIN_DEMO_PASSWORD_HASH"`
+	AdminDemoTenantID       string        `env:"ADMIN_DEMO_TENANT_ID"`
 	LPBaseURL               string        `env:"LP_BASE_URL" envDefault:""`
 	LPAPIKey                string        `env:"LP_API_KEY" envDefault:""`
 	BankBaseURL             string        `env:"BANK_BASE_URL" envDefault:""`
@@ -77,6 +83,17 @@ func Load() (*Config, error) {
 
 	if cfg.AdminSessionTTL <= 0 || cfg.AdminSessionTTL > 12*time.Hour {
 		return nil, fmt.Errorf("config: ADMIN_SESSION_TTL must be greater than 0 and at most 12h")
+	}
+	if cfg.AdminDemoUsername != "" || cfg.AdminDemoPasswordHash != "" || cfg.AdminDemoTenantID != "" {
+		if cfg.AppEnv != "local" || cfg.ExternalMode != "mock" || cfg.KMSMode != "mock" || cfg.AcquirerMode != "mock" || !cfg.RequireAdminAuth || len(cfg.AdminSessionSecret) < 32 || cfg.JWTSecret == "" || !strings.HasPrefix(cfg.HTTPAddr, "127.0.0.1:") {
+			return nil, fmt.Errorf("config: demo login requires loopback HTTP, authenticated local/mock mode and admin secrets")
+		}
+		tenant, tenantErr := uuid.Parse(cfg.AdminDemoTenantID)
+		cost, hashErr := bcrypt.Cost([]byte(cfg.AdminDemoPasswordHash))
+		if cfg.AdminDemoUsername == "" || len(cfg.AdminDemoUsername) > 64 || tenantErr != nil || tenant == uuid.Nil || hashErr != nil || cost < bcrypt.DefaultCost || cost > 12 {
+			return nil, fmt.Errorf("config: demo login requires a username, a nonzero tenant UUID and a bcrypt hash (cost 10-12)")
+		}
+		cfg.AdminDemoTenantID = tenant.String()
 	}
 
 	if cfg.AppEnv == "production" {

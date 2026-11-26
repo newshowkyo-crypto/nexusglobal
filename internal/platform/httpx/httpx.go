@@ -218,18 +218,37 @@ func encodeBase64(b []byte) string {
 }
 
 // AdminLoginPageHandler 渲染管理员登录页面（只渲染 HTML，不做鉴权）。
-func AdminLoginPageHandler(appEnv string) http.HandlerFunc {
+func AdminLoginPageHandler(passwordLogin bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := generateNonce()
 		writeSecurityHeaders(w, nonce)
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(adminLoginHTML(nonce, appEnv)))
+		w.Write([]byte(adminLoginHTML(nonce, passwordLogin && isAdminHTTPS(r))))
 	}
 }
 
 // adminLoginHTML 生成管理员登录页 HTML。
-func adminLoginHTML(nonce, env string) string {
+func adminLoginHTML(nonce string, passwordLogin bool) string {
+	fields := `<div class="form-group">
+<label for="admin-jwt">管理员登录凭证</label>
+<input type="password" id="admin-jwt" name="admin_jwt" placeholder="粘贴管理员提供的短期登录凭证" autocomplete="off" required>
+</div>`
+	hint := "请使用管理员提供的短期登录凭证。"
+	endpoint := "/admin/session/exchange"
+	if passwordLogin {
+		fields = `<div class="form-group">
+<label for="username">账号</label>
+<input id="username" name="username" autocomplete="username" maxlength="64" required>
+</div>
+<div class="form-group">
+<label for="password">密码</label>
+<input type="password" id="password" name="password" autocomplete="current-password" maxlength="72" required>
+</div>`
+		hint = "演示后台 · 只读访问。可使用浏览器密码管理器保存账号。"
+		endpoint = "/admin/session/password"
+	}
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -255,22 +274,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <body>
 <div class="login-card">
 <h1>NexusGlobal 管理后台</h1>
-<form id="login-form">
-<div class="form-group">
-<label for="admin-jwt">管理员登录凭证</label>
-<input type="password" id="admin-jwt" placeholder="粘贴管理员提供的短期登录凭证" autocomplete="off">
-</div>
+<form id="login-form" method="post" action="` + endpoint + `">
+` + fields + `
 <button type="submit" class="submit-btn">登录</button>
 <div id="error-msg" class="error hidden"></div>
 </form>
-<div class="hint">请使用管理员提供的短期登录凭证。<br>登录后建立安全会话，凭证不会保存在浏览器本地存储中。</div>
+<div class="hint">` + hint + `</div>
 </div>
 <script nonce="` + nonce + `">
 document.getElementById('login-form').addEventListener('submit',function(e){
 e.preventDefault();
-var jwt=document.getElementById('admin-jwt').value;
-if(!jwt){showError('请输入管理员登录凭证');return;}
-fetch('/admin/session/exchange',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_jwt:jwt}),credentials:'same-origin'}).then(function(r){return r.json().then(function(d){if(r.ok){window.location.href='/admin/dashboard';}else{showError(d.error?d.error.message:'登录失败');}});}).catch(function(){showError('网络错误，请重试');});
+var credentials=Object.fromEntries(new FormData(e.currentTarget));
+fetch(e.currentTarget.action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials),credentials:'same-origin'}).then(function(r){return r.json().then(function(d){if(r.ok){window.location.href='/admin/dashboard';}else{showError(d.error?d.error.message:'登录失败');}});}).catch(function(){showError('登录失败，请重试');});
 });
 function showError(msg){var el=document.getElementById('error-msg');el.textContent=msg;el.classList.remove('hidden');}
 </script>
@@ -330,34 +345,37 @@ func AdminSessionExchangeHandler(jwtSecret, sessionSecret, appEnv string, sessio
 			return
 		}
 
-		// 签发会话 Cookie
-		sessionCookie, err := signSessionCookie(identity, sessionSecret, appEnv, ttl)
-		if err != nil {
-			writeErrorJSON(w, http.StatusInternalServerError, "INTERNAL", "failed to create session", reqID)
-			return
-		}
-		http.SetCookie(w, sessionCookie)
-
-		// 签发 CSRF Cookie（双提交模式）
-		csrfCookie := signCSRFCookie(appEnv, ttl)
-		if csrfCookie != nil {
-			http.SetCookie(w, csrfCookie)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok","message":"session established"}`))
+		writeAdminSession(w, identity, sessionSecret, appEnv == "production", ttl, reqID)
 	}
 }
 
+func writeAdminSession(w http.ResponseWriter, identity *AdminIdentity, secret string, secure bool, ttl time.Duration, reqID string) {
+	session, err := signSessionCookie(identity, secret, secure, ttl)
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, "INTERNAL", "failed to create session", reqID)
+		return
+	}
+	csrf := signCSRFCookie(secure, session.MaxAge)
+	if csrf == nil {
+		writeErrorJSON(w, http.StatusInternalServerError, "INTERNAL", "failed to create session", reqID)
+		return
+	}
+	http.SetCookie(w, session)
+	http.SetCookie(w, csrf)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok","message":"session established"}`))
+}
+
 // AdminSessionLogoutHandler 清除会话 Cookie 和 CSRF Cookie。
-func AdminSessionLogoutHandler(appEnv string) http.HandlerFunc {
+func AdminSessionLogoutHandler(secure bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			reqID := r.Header.Get("X-Request-ID")
 			writeErrorJSON(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "only POST is accepted", reqID)
 			return
 		}
+		secureRequest := secure || isAdminHTTPS(r)
 		// 清除会话 Cookie
 		http.SetCookie(w, &http.Cookie{
 			Name:     AdminSessionCookieName,
@@ -365,6 +383,7 @@ func AdminSessionLogoutHandler(appEnv string) http.HandlerFunc {
 			Path:     "/admin",
 			MaxAge:   -1,
 			HttpOnly: true,
+			Secure:   secureRequest,
 			SameSite: http.SameSiteStrictMode,
 		})
 		// 清除 CSRF Cookie
@@ -373,6 +392,7 @@ func AdminSessionLogoutHandler(appEnv string) http.HandlerFunc {
 			Value:    "",
 			Path:     "/admin",
 			MaxAge:   -1,
+			Secure:   secureRequest,
 			SameSite: http.SameSiteStrictMode,
 		})
 		w.Header().Set("Content-Type", "application/json")

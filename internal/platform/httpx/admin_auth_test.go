@@ -752,7 +752,7 @@ func TestSignSessionCookie_ProductionSecure(t *testing.T) {
 		Subject: "admin-001",
 		Role:    AdminRoleSecurityAdmin,
 	}
-	cookie, err := signSessionCookie(identity, "session-secret", "production", AdminSessionMaxAge)
+	cookie, err := signSessionCookie(identity, "session-secret", true, AdminSessionMaxAge)
 	require.NoError(t, err)
 	assert.True(t, cookie.Secure, "production cookie must be Secure")
 	assert.True(t, cookie.HttpOnly, "cookie must be HttpOnly")
@@ -764,7 +764,7 @@ func TestSignSessionCookie_LocalNotSecure(t *testing.T) {
 		Subject: "admin-001",
 		Role:    AdminRoleSecurityAdmin,
 	}
-	cookie, err := signSessionCookie(identity, "session-secret", "local", AdminSessionMaxAge)
+	cookie, err := signSessionCookie(identity, "session-secret", false, AdminSessionMaxAge)
 	require.NoError(t, err)
 	assert.False(t, cookie.Secure, "local cookie should not be Secure")
 	assert.True(t, cookie.HttpOnly, "cookie must be HttpOnly")
@@ -775,7 +775,7 @@ func TestSignSessionCookie_EmptySecret_Error(t *testing.T) {
 		Subject: "admin-001",
 		Role:    AdminRoleSecurityAdmin,
 	}
-	_, err := signSessionCookie(identity, "", "local", AdminSessionMaxAge)
+	_, err := signSessionCookie(identity, "", false, AdminSessionMaxAge)
 	assert.Error(t, err)
 }
 

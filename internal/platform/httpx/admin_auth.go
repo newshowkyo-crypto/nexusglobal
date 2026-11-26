@@ -158,7 +158,7 @@ func GetAdminIdentity(ctx context.Context) (*AdminIdentity, bool) {
 // 会话 JWT 的 claims 复用 AdminIdentity 的 sub/role/username/tenant_id，
 // 但 iss 改为 "nexusglobal-admin-session"，aud 改为 "nexusglobal-admin-dashboard"，
 // exp 不超过 ttl（默认 AdminSessionMaxAge，可经 ADMIN_SESSION_TTL 调整）。
-func signSessionCookie(identity *AdminIdentity, sessionSecret, appEnv string, ttl time.Duration) (*http.Cookie, error) {
+func signSessionCookie(identity *AdminIdentity, sessionSecret string, secure bool, ttl time.Duration) (*http.Cookie, error) {
 	if sessionSecret == "" {
 		return nil, fmt.Errorf("ADMIN_SESSION_SECRET not configured")
 	}
@@ -166,12 +166,12 @@ func signSessionCookie(identity *AdminIdentity, sessionSecret, appEnv string, tt
 	// 会话有效期 = min(配置时长, 来源 Admin JWT 剩余有效期)。
 	ttl = normalizeSessionTTL(ttl)
 	if !identity.SourceExpiry.IsZero() {
-		remaining := time.Until(identity.SourceExpiry)
+		remaining := identity.SourceExpiry.Sub(now)
 		if remaining < ttl {
 			ttl = remaining
 		}
 	}
-	if ttl <= 0 {
+	if ttl < time.Second {
 		return nil, fmt.Errorf("source admin JWT already expired; cannot establish session")
 	}
 	claims := jwt.MapClaims{
@@ -195,10 +195,8 @@ func signSessionCookie(identity *AdminIdentity, sessionSecret, appEnv string, tt
 		Path:     "/admin",
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
-	}
-	if appEnv == "production" {
-		cookie.Secure = true
 	}
 	return cookie, nil
 }
@@ -266,7 +264,7 @@ func verifySessionCookie(r *http.Request, sessionSecret string) *AdminIdentity {
 // signCSRFCookie 签发一个 CSRF 双提交 Cookie。
 // Cookie 不带 HttpOnly（前端 JS 需要读取），SameSite=Strict。
 // MaxAge 必须与会话 Cookie 同步，否则会话仍在但写请求会因 CSRF Cookie 过期被拒。
-func signCSRFCookie(appEnv string, ttl time.Duration) *http.Cookie {
+func signCSRFCookie(secure bool, maxAge int) *http.Cookie {
 	b := make([]byte, 32)
 	if _, err := readRandBytes(b); err != nil {
 		return nil
@@ -276,12 +274,10 @@ func signCSRFCookie(appEnv string, ttl time.Duration) *http.Cookie {
 		Name:     AdminCSRFCookieName,
 		Value:    token,
 		Path:     "/admin",
-		MaxAge:   int(normalizeSessionTTL(ttl).Seconds()),
+		MaxAge:   maxAge,
 		HttpOnly: false,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
-	}
-	if appEnv == "production" {
-		cookie.Secure = true
 	}
 	return cookie
 }

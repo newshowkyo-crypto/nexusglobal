@@ -373,9 +373,13 @@ func BuildRouter(deps Deps) *chi.Mux {
 		r.Group(func(r chi.Router) {
 			// ADM-020: 登录交换是未鉴权入口，用固定窗口对 IP 简单限流防爆破
 			r.Use(ipLoginRateLimit())
-			r.Get("/login", httpx.AdminLoginPageHandler(cfg.AppEnv))
+			demoLogin := cfg.AdminDemoUsername != ""
+			r.Get("/login", httpx.AdminLoginPageHandler(demoLogin))
 			r.Post("/session/exchange", httpx.AdminSessionExchangeHandler(cfg.JWTSecret, cfg.AdminSessionSecret, cfg.AppEnv, cfg.AdminSessionTTL))
-			r.Post("/session/logout", httpx.AdminSessionLogoutHandler(cfg.AppEnv))
+			if demoLogin {
+				r.Post("/session/password", httpx.AdminDemoLoginHandler(cfg.AdminDemoUsername, cfg.AdminDemoPasswordHash, cfg.AdminDemoTenantID, cfg.AdminSessionSecret, cfg.AdminSessionTTL))
+			}
+			r.Post("/session/logout", http.NewCrossOriginProtection().Handler(httpx.AdminSessionLogoutHandler(cfg.AppEnv == "production")).ServeHTTP)
 		})
 
 		// P0-1: AdminAuthStrict 现在同时支持 Bearer JWT 和已签名会话 Cookie�?
@@ -973,6 +977,7 @@ func ipLoginRateLimit() func(http.Handler) http.Handler {
 	const maxHits = 10
 	var mu sync.Mutex
 	hits := map[string][]time.Time{}
+	var lastSweep time.Time
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -981,6 +986,14 @@ func ipLoginRateLimit() func(http.Handler) http.Handler {
 			}
 			now := time.Now()
 			mu.Lock()
+			if now.Sub(lastSweep) >= window {
+				for client, times := range hits {
+					if now.Sub(times[len(times)-1]) >= window {
+						delete(hits, client)
+					}
+				}
+				lastSweep = now
+			}
 			fresh := hits[ip][:0]
 			for _, t := range hits[ip] {
 				if now.Sub(t) < window {
